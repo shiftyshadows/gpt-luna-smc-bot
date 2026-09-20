@@ -3,6 +3,19 @@
 The strategy lives in `src/strategy/` and is intentionally split into a pure
 closed-bar analyzer and a cTrader JSON message handler.
 
+## Entrypoint
+
+`run_bot` is canonical bot entrypoint. It authenticates cTrader, attaches
+strategy to shared dispatcher, subscribes to spot and closed M5 bars, requests
+history, then keeps dispatcher loop alive.
+
+```bash
+CTRADER_SYMBOL_ID=41 CTRADER_EQUITY=10000 ./run_bot
+./run_bot 41 --config config/smc_strategy.json --equity 10000
+```
+
+`Dockerfile` starts `./run_bot`. `run.py` remains Flask API server entrypoint.
+
 ## Runtime wiring
 
 ```python

@@ -1,35 +1,127 @@
 #!/usr/bin/env python3
-"""
-Run the SMCTradingBot for a given symbol ID.
+"""Run 5-minute SMC strategy against cTrader Open API JSON stream.
+
 Usage:
-    python run_bot.py 1
+    ./run_bot [SYMBOL_ID] [--config config/smc_strategy.json]
 """
 
-import sys
+from __future__ import annotations
+
+import argparse
+import json
 import logging
-from src.utils.gold_smc_trading_bot import SMCTradingBot
+import os
+import signal
+import time
+from queue import Empty
+from typing import Any
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+from src.strategy import CTraderSMCStrategy, SMCConfig
+from src.utils.flask_ensure_authentication import ensure_authenticated
 
-def main():
-    # Check command-line arguments
-    if len(sys.argv) < 2:
-        logging.error("❌ Please provide a symbol ID as an argument.")
-        sys.exit(1)
+LOG = logging.getLogger("run_bot")
+
+
+def load_config(path: str) -> SMCConfig:
+    with open(path, "r", encoding="utf-8") as config_file:
+        values: dict[str, Any] = json.load(config_file)
+    return SMCConfig.from_mapping(values)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the 5-minute cTrader SMC strategy")
+    parser.add_argument(
+        "symbol_id",
+        nargs="?",
+        type=int,
+        default=int(os.getenv("CTRADER_SYMBOL_ID", "41")),
+        help="cTrader symbol ID, default: CTRADER_SYMBOL_ID or 41",
+    )
+    parser.add_argument(
+        "--config",
+        default=os.getenv("SMC_CONFIG_PATH", "config/smc_strategy.json"),
+        help="strategy JSON configuration path",
+    )
+    parser.add_argument(
+        "--equity",
+        type=float,
+        default=float(os.getenv("CTRADER_EQUITY", "0")) or None,
+        help="account equity used for risk sizing, or CTRADER_EQUITY",
+    )
+    parser.add_argument(
+        "--history-days",
+        type=int,
+        default=int(os.getenv("SMC_HISTORY_DAYS", "30")),
+        help="historical 5m lookback in days",
+    )
+    return parser.parse_args(argv)
+
+
+def run(args: argparse.Namespace) -> None:
+    # Import route module only after argument parsing. This keeps --help usable
+    # without cTrader credentials or a live MongoDB connection.
+    from src.api.routes.ctrader import ctrader_client
+
+    authenticated, account_or_error = ensure_authenticated(ctrader_client)
+    if not authenticated:
+        raise RuntimeError(f"cTrader authentication failed: {account_or_error}")
+
+    account_id = int(account_or_error)
+    config = load_config(args.config)
+    strategy = CTraderSMCStrategy(
+        ctrader_client,
+        account_id,
+        args.symbol_id,
+        config,
+        equity=args.equity,
+    )
+    strategy.attach()
+    now_ms = int(time.time() * 1000)
+    strategy.start(
+        from_timestamp=now_ms - args.history_days * 24 * 60 * 60 * 1000,
+        to_timestamp=now_ms,
+    )
+
+    stopping = False
+
+    def request_stop(signum: int, _frame: Any) -> None:
+        nonlocal stopping
+        LOG.info("Stop signal received: %s", signum)
+        stopping = True
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+    LOG.info("SMC strategy running for account %s, symbol %s", account_id, args.symbol_id)
 
     try:
-        symbol_id = int(sys.argv[1])
-    except ValueError:
-        logging.error("❌ Symbol ID must be an integer.")
-        sys.exit(1)
+        while not stopping:
+            ctrader_client.dispatch_messages(timeout=0.2)
+            # Existing routes use main_queue. Drain packets after strategy
+            # handlers process them so a long-running bot cannot block at 100.
+            while True:
+                try:
+                    ctrader_client.main_queue.get_nowait()
+                except Empty:
+                    break
+    finally:
+        strategy.detach()
+        ctrader_client.close()
+        LOG.info("SMC strategy stopped")
 
-    # Initialize and run the trading bot
-    bot = SMCTradingBot(symbolId=symbol_id)
-    bot.run_loop()
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+    args = parse_args(argv)
+    try:
+        run(args)
+    except Exception as exc:
+        LOG.error("Bot stopped: %s", exc)
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
