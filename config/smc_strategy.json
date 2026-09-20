@@ -1,0 +1,16 @@
+{
+  "pivot_left": 5,
+  "pivot_right": 5,
+  "atr_period": 14,
+  "ob_lookback": 20,
+  "lee_ready_threshold": 0.35,
+  "risk_percentage": 1.0,
+  "target_rr": 2.5,
+  "atr_buffer_multiplier": 0.5,
+  "max_setup_bars": 3,
+  "volume_step": 1000,
+  "minimum_volume": 1000,
+  "maximum_volume": 100000000,
+  "value_per_price_unit": 1.0,
+  "require_ob_confluence": false
+}

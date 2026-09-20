@@ -60,6 +60,10 @@ class CTraderTCPClient:
         self.socket_lock = RLock() # 🔒 The "Talking Stick"
         self.main_queue = Queue(maxsize=100)
         self.depth_queue = Queue(maxsize=2000)
+        # Consumers such as the SMC strategy can observe packets without
+        # opening a second competing socket reader. The main queue remains
+        # populated for existing route consumers.
+        self.message_handlers = []
 
         self.access_token = None
         self._recv_buffer = b""
@@ -529,4 +533,23 @@ class CTraderTCPClient:
                     except: pass
                 else:
                     # Everything else goes to Main (2157, 2158, 2142, etc.)
+                    for handler in tuple(self.message_handlers):
+                        try:
+                            handler(packet)
+                        except Exception:
+                            logging.exception("Message handler failed")
                     self.main_queue.put(packet)
+
+    def add_message_handler(self, handler):
+        """Register a callable for packets received by ``dispatch_messages``."""
+        if not callable(handler):
+            raise TypeError("handler must be callable")
+        with self.socket_lock:
+            if handler not in self.message_handlers:
+                self.message_handlers.append(handler)
+
+    def remove_message_handler(self, handler):
+        """Unregister a previously attached packet handler."""
+        with self.socket_lock:
+            if handler in self.message_handlers:
+                self.message_handlers.remove(handler)

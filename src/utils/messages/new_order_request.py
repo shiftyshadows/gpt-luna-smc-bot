@@ -39,7 +39,7 @@ class NewOrderRequest(OpenAPIMessage):
                  trailingStopLoss: bool = None,
                  guaranteedStopLoss: bool = False,
                  stopTriggerMethod: int = None,
-                 clientMsgId: str = str(uuid.uuid4())
+                 clientMsgId: str = None
                  ):
         """
            This method initializes a `NeworderRequest` instance.
@@ -67,8 +67,11 @@ class NewOrderRequest(OpenAPIMessage):
                 minutes=expirationTimestamp)).timestamp() * 1000
         ) if self.time_in_force == 1 else None
 
-        self.stop_loss = stopLoss if orderType != 1 else None
-        self.take_profit = takeProfit if orderType != 1 else None
+        # cTrader accepts absolute protective prices on market orders. The
+        # previous implementation silently dropped them for orderType=1,
+        # making strategy-side risk controls ineffective.
+        self.stop_loss = stopLoss
+        self.take_profit = takeProfit
 
         self.order_comment = orderComment
         self.base_slippage_price = None
@@ -80,7 +83,7 @@ class NewOrderRequest(OpenAPIMessage):
         self.guaranteed_stop_loss = guaranteedStopLoss
         self.trailing_stop_loss = trailingStopLoss if orderType == 1 else None
         self.stop_trigger_method = stopTriggerMethod
-        self.clientMsgId = clientMsgId
+        self.clientMsgId = clientMsgId or str(uuid.uuid4())
 
     def client_msg_id(self) -> str:
         """
