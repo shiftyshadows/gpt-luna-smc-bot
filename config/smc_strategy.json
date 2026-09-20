@@ -8,6 +8,8 @@
   "target_rr": 2.5,
   "atr_buffer_multiplier": 0.5,
   "max_setup_bars": 3,
+  "tick_timeout_ms": 5000,
+  "max_tick_pages": 10,
   "volume_step": 1000,
   "minimum_volume": 1000,
   "maximum_volume": 100000000,

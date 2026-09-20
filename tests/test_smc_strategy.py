@@ -1,5 +1,6 @@
 import unittest
 import socket
+import runpy
 
 from src.strategy.ctrader_smc_strategy import CTraderSMCStrategy
 from src.strategy.smc_lee_ready import (
@@ -110,6 +111,82 @@ class LeeReadyAndSMCTest(unittest.TestCase):
             right.close()
             left.close()
             client.oauth_manager.mclient.close()
+
+    def test_spot_reader_handles_unframed_json_and_full_main_queue(self):
+        client = CTraderTCPClient()
+        left, right = socket.socketpair()
+        try:
+            client.client = left
+            right.sendall(b'{"payloadType":2131,"payload":{"bid":1.4,"ask":1.5}}')
+            event = client.recv_spot_events(2131, timeout=0.2)
+            self.assertEqual(event["payloadType"], 2131)
+
+            for index in range(client.main_queue.maxsize):
+                client.main_queue.put_nowait({"payloadType": index})
+            right.sendall(b'{"payloadType":2131,"payload":{"bid":1.4,"ask":1.5}}')
+            client.dispatch_messages(timeout=0.2)
+            self.assertEqual(client.main_queue.qsize(), client.main_queue.maxsize)
+        finally:
+            right.close()
+            left.close()
+            client.oauth_manager.mclient.close()
+
+    def test_order_rejection_releases_in_flight_slot(self):
+        client = FakeClient()
+        strategy = CTraderSMCStrategy(client, 42, 7, SMCConfig(
+            minimum_volume=1000, volume_step=1000, atr_buffer_multiplier=0,
+        ), equity=10000, now_ms=lambda: 1_000_000)
+        strategy.analyzer.bias = "bullish"
+        strategy.analyzer.fvgs.append(FairValueGap("reject-zone", "bullish", 1, 1.1, 1))
+        request = strategy.on_spot(1.04, 1.05)
+        strategy.handle_message({
+            "payloadType": 2146,
+            "clientMsgId": request["clientMsgId"],
+            "payload": {"tickData": [
+                {"price": 1.06, "volume": 10},
+                {"price": 1.07, "volume": 10},
+            ]},
+        })
+        order = client.sent[-1]
+        label = order["payload"]["label"]
+        self.assertEqual(strategy.open_trade_count, 0)
+        self.assertEqual(len(strategy.orders_in_flight), 1)
+        strategy.handle_message({
+            "payloadType": 2132,
+            "payload": {"label": label, "errorCode": "REJECTED"},
+        })
+        self.assertEqual(strategy.orders_in_flight, {})
+
+    def test_tick_pages_accumulate_before_scoring(self):
+        client = FakeClient()
+        strategy = CTraderSMCStrategy(client, 42, 7, SMCConfig(
+            minimum_volume=1000, volume_step=1000, atr_buffer_multiplier=0,
+        ), equity=10000, now_ms=lambda: 1_000_000)
+        strategy.analyzer.bias = "bullish"
+        strategy.analyzer.fvgs.append(FairValueGap("page-zone", "bullish", 1, 1.1, 1))
+        request = strategy.on_spot(1.04, 1.05)
+        strategy.handle_message({
+            "payloadType": 2146,
+            "clientMsgId": request["clientMsgId"],
+            "payload": {"hasMore": True, "tickData": [
+                {"timestamp": 900000, "price": 1.06, "volume": 10},
+            ]},
+        })
+        self.assertIsNotNone(strategy.pending)
+        self.assertEqual(client.sent[-1]["payload"]["toTimestamp"], 899999)
+        strategy.handle_message({
+            "payloadType": 2146,
+            "clientMsgId": request["clientMsgId"],
+            "payload": {"hasMore": False, "tickData": [
+                {"timestamp": 899000, "price": 1.07, "volume": 10},
+            ]},
+        })
+        self.assertEqual(client.sent[-1]["payloadType"], 2106)
+
+    def test_run_bot_parser_rejects_invalid_history_days(self):
+        module = runpy.run_path("run_bot")
+        with self.assertRaises(SystemExit):
+            module["parse_args"](["--history-days", "0"])
 
 
 if __name__ == "__main__":

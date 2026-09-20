@@ -122,6 +122,8 @@ class SMCConfig:
     target_rr: float = 2.5
     atr_buffer_multiplier: float = 0.5
     max_setup_bars: int = 3
+    tick_timeout_ms: int = 5000
+    max_tick_pages: int = 10
     max_active_trades: int = 1
     volume_step: int = 1000
     minimum_volume: int = 1000
@@ -147,6 +149,8 @@ class SMCConfig:
             raise ValueError("lee_ready_threshold must be in (0, 1]")
         if self.risk_percentage <= 0 or self.target_rr <= 0:
             raise ValueError("risk_percentage and target_rr must be positive")
+        if self.tick_timeout_ms < 1 or self.max_tick_pages < 1:
+            raise ValueError("tick timeout and page limit must be positive")
         if self.atr_buffer_multiplier < 0 or self.value_per_price_unit <= 0:
             raise ValueError("ATR buffer and value_per_price_unit are invalid")
 

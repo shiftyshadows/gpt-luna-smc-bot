@@ -12,7 +12,7 @@ import requests
 import struct
 from os import getenv
 from time import sleep, time
-from queue import Queue
+from queue import Full, Queue
 from threading import Thread, Event, RLock
 from src.utils.oauth_manager import OAuthManager
 from src.utils.messages.application_authentication_request import ApplicationAuthRequest
@@ -417,6 +417,8 @@ class CTraderTCPClient:
             logging.warning(f"⚠️ Error closing raw socket: {e}")
         finally:
             self.raw_socket = None
+            self._recv_buffer = b""
+            self._dispatch_buffer = ""
 
         # 5. ✅ Reconnect if requested
         if reconnect:
@@ -427,46 +429,18 @@ class CTraderTCPClient:
 
     def recv_spot_events(self, payload_type: int, timeout: int = 5):
         """
-           Reads from the socket line by line, returning a list
-           of all JSON objects that arrived. If no data arrives for
-           `timeout` seconds, it returns any parsed messages so far
-            (or an empty list if none).
+           Return first packet matching payload_type before timeout.
+           Return None when no matching packet arrives.
         """
-        start = time()
-        json_objects = []
-        start_index = 0
-        buffer = ""
-
-        while time() - start < timeout:
-            chunk = self.client.recv(1024).decode("utf-8")
-            if not chunk:
-                break
-            try:
-                chunk_json = json.loads(chunk.strip())
-                if chunk_json.get("payloadType") != payload_type:
-                    print("💓 Ignoring Heartbeat...")
-                    continue
-            except json.JSONDecodeError:
-                pass
-
-            buffer += chunk
-            if buffer.endswith("\n"):
-                break
-        print("📥 Raw Received:", repr(buffer))
-        while True:
-            # Find the start of the next JSON object
-            next_start = buffer.find('{"payloadType":', start_index + 1)
-            if next_start == -1:
-                break
-            # Extract the current JSON object
-            json_str = buffer[start_index:next_start]
-            json_objects.append(json_str)
-            start_index = next_start
-        # Add the last JSON object
-        json_objects.append(buffer[start_index:])
-        print(json_objects)
-        logging.info(f"✅ Returning last spot event: {json_objects[0]}")
-        return json.loads(json_objects[0])
+        if not self.client:
+            return None
+        deadline = time() + timeout
+        while time() < deadline:
+            packets = self.recv_depth_events(timeout=max(0.001, deadline - time()))
+            for packet in packets:
+                if packet.get("payloadType") == payload_type:
+                    return packet
+        return None
 
     def recv_depth_events(self, payload_type: int = 2155, timeout: int = 5):
         """
@@ -540,7 +514,10 @@ class CTraderTCPClient:
                             handler(packet)
                         except Exception:
                             logging.exception("Message handler failed")
-                    self.main_queue.put(packet)
+                    try:
+                        self.main_queue.put_nowait(packet)
+                    except Full:
+                        logging.warning("Main message queue full; dropping payload type %s", p_type)
 
     def add_message_handler(self, handler):
         """Register a callable for packets received by ``dispatch_messages``."""

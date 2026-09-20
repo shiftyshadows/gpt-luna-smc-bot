@@ -80,6 +80,7 @@ stale setup cancels the setup. The default limit is one active/in-flight trade.
 | `target_rr` | `2.5` | Fixed risk-to-reward target |
 | `atr_buffer_multiplier` | `0.5` | ATR distance beyond the zone |
 | `max_setup_bars` | `3` | Bars before an unanswered setup is invalidated |
+| `tick_timeout_ms` / `max_tick_pages` | `5000` / `10` | Tick request deadline and pagination cap |
 | `volume_step` / `minimum_volume` | `1000` / `1000` | Broker unit normalization |
 | `value_per_price_unit` | `1.0` | Account-currency value of one price unit per cTrader unit |
 | `require_ob_confluence` | `false` | Require price to be in linked OB and FVG |

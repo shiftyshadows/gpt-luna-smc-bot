@@ -42,6 +42,15 @@ class PendingZoneSetup:
     intercepted_at_ms: int
     bar_count: int
     request_id: str
+    request_from_ms: int
+    request_to_ms: int
+    deadline_ms: int
+    tick_pages: int = 0
+    ticks: Optional[list[dict[str, Any]]] = None
+
+    def __post_init__(self) -> None:
+        if self.ticks is None:
+            self.ticks = []
 
 
 class CTraderSMCStrategy:
@@ -53,6 +62,7 @@ class CTraderSMCStrategy:
     SPOT_EVENT = 2131
     TICK_DATA_RESPONSE = 2146
     ERROR_RESPONSE = 2142
+    ORDER_ERROR_RESPONSE = 2132
     EXECUTION_EVENT = 2126
 
     def __init__(
@@ -72,6 +82,7 @@ class CTraderSMCStrategy:
         self.analyzer = SMCAnalyzer(self.config)
         self.equity = equity
         self.open_trade_count = 0
+        self.orders_in_flight: dict[str, Optional[int]] = {}
         self.pending: Optional[PendingZoneSetup] = None
         self.invalidated_setups: set[str] = set()
         self.last_quote: dict[str, float] = {}
@@ -130,6 +141,9 @@ class CTraderSMCStrategy:
         if payload_type == self.ERROR_RESPONSE:
             self._handle_error(message)
             return None
+        if payload_type == self.ORDER_ERROR_RESPONSE:
+            self._handle_order_error(message)
+            return None
         if payload_type == self.EXECUTION_EVENT:
             self._handle_execution(message)
             return None
@@ -154,7 +168,10 @@ class CTraderSMCStrategy:
         self.last_quote = {"bid": float(bid), "ask": float(ask)}
         now = int(timestamp_ms or self._now_ms())
         self._expire_pending(now)
-        if self.pending is not None or self.open_trade_count >= self.config.max_active_trades:
+        if (
+            self.pending is not None
+            or self.open_trade_count + len(self.orders_in_flight) >= self.config.max_active_trades
+        ):
             return None
         # Use executable-side prices for zone tests, not an untradeable midpoint.
         for direction, price in (("bullish", ask), ("bearish", bid)):
@@ -164,12 +181,22 @@ class CTraderSMCStrategy:
             if zone is None or zone.id in self.invalidated_setups or not zone.active:
                 continue
             request_id = str(uuid.uuid4())
-            self.pending = PendingZoneSetup(zone.id, direction, now, 0, request_id)
+            from_ms = now - 5 * 60 * 1000
+            self.pending = PendingZoneSetup(
+                zone.id,
+                direction,
+                now,
+                0,
+                request_id,
+                from_ms,
+                now,
+                now + self.config.tick_timeout_ms,
+            )
             request = TickDataRequest(
                 self.account_id,
                 self.symbol_id,
                 tickType=1,
-                from_timestamp=now - 5 * 60 * 1000,
+                from_timestamp=from_ms,
                 to_timestamp=now,
                 clientMsgId=request_id,
             )
@@ -181,11 +208,18 @@ class CTraderSMCStrategy:
     def _expire_pending(self, now_ms: int) -> None:
         if self.pending is None:
             return
-        timed_out = now_ms - self.pending.intercepted_at_ms >= self.config.max_setup_bars * 5 * 60 * 1000
+        timed_out = (
+            now_ms >= self.pending.deadline_ms
+            or now_ms - self.pending.intercepted_at_ms >= self.config.max_setup_bars * 5 * 60 * 1000
+        )
         bar_timed_out = self.pending.bar_count >= self.config.max_setup_bars
         if timed_out or bar_timed_out:
             self.invalidated_setups.add(self.pending.zone_id)
             self.pending = None
+
+    def on_timer(self, timestamp_ms: Optional[int] = None) -> None:
+        """Expire pending tick requests when no bar or quote arrives."""
+        self._expire_pending(int(timestamp_ms or self._now_ms()))
 
     def _handle_spot(self, message: dict[str, Any]) -> None:
         payload = message.get("payload", {})
@@ -226,10 +260,32 @@ class CTraderSMCStrategy:
         ticks = payload.get("tickData") or payload.get("ticks") or []
         if not ticks:
             LOG.warning("Tick response for %s contained no data; setup cancelled", self.pending.zone_id)
-            self.invalidated_setups.add(self.pending.zone_id)
-            self.pending = None
+            self._cancel_pending()
             return None
-        score = calculate_lee_ready_score(ticks, price_scale=self.config.price_scale)
+        self.pending.ticks.extend(ticks)
+        self.pending.tick_pages += 1
+        if payload.get("hasMore"):
+            if self.pending.tick_pages >= self.config.max_tick_pages:
+                LOG.warning("Tick response page limit reached for %s", self.pending.zone_id)
+                self._cancel_pending()
+                return None
+            earliest = self._earliest_tick_timestamp(ticks)
+            if earliest is None:
+                LOG.warning("Cannot paginate tick response without timestamps")
+                self._cancel_pending()
+                return None
+            self.pending.request_to_ms = earliest - 1
+            request = TickDataRequest(
+                self.account_id,
+                self.symbol_id,
+                tickType=1,
+                from_timestamp=self.pending.request_from_ms,
+                to_timestamp=self.pending.request_to_ms,
+                clientMsgId=self.pending.request_id,
+            )
+            self._send(request.as_json_string())
+            return None
+        score = calculate_lee_ready_score(self.pending.ticks, price_scale=self.config.price_scale)
         direction = self.pending.direction
         threshold_passed = score.score >= self.config.lee_ready_threshold if direction == "bullish" else score.score <= -self.config.lee_ready_threshold
         zone = self._find_zone(self.pending.zone_id)
@@ -240,8 +296,26 @@ class CTraderSMCStrategy:
             return None
         return self._execute_market(zone, direction, score.score)
 
+    def _cancel_pending(self) -> None:
+        if self.pending is not None:
+            self.invalidated_setups.add(self.pending.zone_id)
+            self.pending = None
+
+    @staticmethod
+    def _earliest_tick_timestamp(ticks: list[dict[str, Any]]) -> Optional[int]:
+        values = []
+        for tick in ticks:
+            for key in ("timestampMs", "timestamp", "time"):
+                if tick.get(key) is not None:
+                    try:
+                        values.append(int(tick[key]))
+                    except (TypeError, ValueError):
+                        pass
+                    break
+        return min(values) if values else None
+
     def _execute_market(self, zone: FairValueGap | OrderBlock, direction: Direction, score: float) -> Optional[dict[str, Any]]:
-        if self.open_trade_count >= self.config.max_active_trades or self.equity is None:
+        if self.open_trade_count + len(self.orders_in_flight) >= self.config.max_active_trades or self.equity is None:
             LOG.warning("Trade blocked: missing equity or active-trade limit reached")
             return None
         quote = self.last_quote
@@ -289,7 +363,7 @@ class CTraderSMCStrategy:
         payload = order.as_json_string()
         self._send(payload)
         self.sent_order_ids.add(label)
-        self.open_trade_count += 1
+        self.orders_in_flight[label] = None
         return payload
 
     def _handle_error(self, message: dict[str, Any]) -> None:
@@ -298,13 +372,48 @@ class CTraderSMCStrategy:
             self.invalidated_setups.add(self.pending.zone_id)
             self.pending = None
 
+    def _handle_order_error(self, message: dict[str, Any]) -> None:
+        payload = message.get("payload", {})
+        label = self._order_label(payload)
+        if label:
+            self.orders_in_flight.pop(label, None)
+        elif len(self.orders_in_flight) == 1:
+            self.orders_in_flight.clear()
+        LOG.error("cTrader order rejected: %s", payload)
+
     def _handle_execution(self, message: dict[str, Any]) -> None:
         payload = message.get("payload", {})
-        if payload.get("executionType") == 3:
-            self.open_trade_count = max(1, self.open_trade_count)
+        order = payload.get("order", {}) or {}
+        label = self._order_label(payload)
+        if label and label not in self.orders_in_flight:
+            return
+        if label is None and len(self.orders_in_flight) != 1:
+            return
+        if label and payload.get("executionType") == 2:
+            self.orders_in_flight[label] = order.get("orderId")
+        elif payload.get("executionType") == 3:
+            if label:
+                self.orders_in_flight.pop(label, None)
+            else:
+                self.orders_in_flight.pop(next(iter(self.orders_in_flight)), None)
+            if order.get("orderStatus") == 2:
+                self.open_trade_count += 1
+        elif payload.get("executionType") == 7:
+            if label:
+                self.orders_in_flight.pop(label, None)
+            elif len(self.orders_in_flight) == 1:
+                self.orders_in_flight.clear()
         account_equity = extract_equity(message)
         if account_equity is not None:
             self.equity = account_equity
+
+    @staticmethod
+    def _order_label(payload: dict[str, Any]) -> Optional[str]:
+        order = payload.get("order", {}) or {}
+        for value in (order.get("label"), order.get("clientOrderId"), payload.get("label")):
+            if value:
+                return str(value)
+        return None
 
     def _find_zone(self, zone_id: str) -> Optional[FairValueGap | OrderBlock]:
         for zone in [*self.analyzer.fvgs, *self.analyzer.order_blocks]:

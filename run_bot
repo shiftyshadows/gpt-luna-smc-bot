@@ -22,6 +22,26 @@ from src.utils.flask_ensure_authentication import ensure_authenticated
 LOG = logging.getLogger("run_bot")
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
 def load_config(path: str) -> SMCConfig:
     with open(path, "r", encoding="utf-8") as config_file:
         values: dict[str, Any] = json.load(config_file)
@@ -33,7 +53,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "symbol_id",
         nargs="?",
-        type=int,
+        type=positive_int,
         default=int(os.getenv("CTRADER_SYMBOL_ID", "41")),
         help="cTrader symbol ID, default: CTRADER_SYMBOL_ID or 41",
     )
@@ -44,13 +64,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--equity",
-        type=float,
+        type=positive_float,
         default=float(os.getenv("CTRADER_EQUITY", "0")) or None,
         help="account equity used for risk sizing, or CTRADER_EQUITY",
     )
     parser.add_argument(
         "--history-days",
-        type=int,
+        type=positive_int,
         default=int(os.getenv("SMC_HISTORY_DAYS", "30")),
         help="historical 5m lookback in days",
     )
@@ -96,6 +116,7 @@ def run(args: argparse.Namespace) -> None:
     try:
         while not stopping:
             ctrader_client.dispatch_messages(timeout=0.2)
+            strategy.on_timer()
             # Existing routes use main_queue. Drain packets after strategy
             # handlers process them so a long-running bot cannot block at 100.
             while True:
