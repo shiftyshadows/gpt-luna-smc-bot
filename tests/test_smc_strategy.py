@@ -1,4 +1,5 @@
 import unittest
+import socket
 
 from src.strategy.ctrader_smc_strategy import CTraderSMCStrategy
 from src.strategy.smc_lee_ready import (
@@ -9,6 +10,7 @@ from src.strategy.smc_lee_ready import (
     calculate_lee_ready_score,
 )
 from src.utils.messages.new_order_request import NewOrderRequest
+from src.utils.ctrader_tcp_client import CTraderTCPClient
 
 
 class FakeClient:
@@ -82,6 +84,32 @@ class LeeReadyAndSMCTest(unittest.TestCase):
         self.assertEqual(order["payload"]["tradeSide"], 1)
         self.assertIsNotNone(order["payload"]["stopLoss"])
         self.assertIsNotNone(order["payload"]["takeProfit"])
+
+    def test_dispatcher_handles_complete_json_without_newline_and_expires_setup(self):
+        client = CTraderTCPClient()
+        strategy = CTraderSMCStrategy(
+            client, 42, 7, SMCConfig(max_setup_bars=1), equity=10000,
+            now_ms=lambda: 1_000_000,
+        )
+        strategy.analyzer.bias = "bullish"
+        strategy.analyzer.fvgs.append(FairValueGap("dispatch-zone", "bullish", 1, 2, 1))
+        strategy.attach()
+        left, right = socket.socketpair()
+        try:
+            client.client = left
+            right.sendall(b'{"payloadType":2131,"payload":{"bid":1.4,"ask":1.5}}')
+            client.dispatch_messages(timeout=0.2)
+            self.assertIsNotNone(strategy.pending)
+            strategy.on_closed_bar({
+                "timestamp": 1, "open": 1.0, "high": 1.1,
+                "low": 0.9, "close": 1.0,
+            })
+            self.assertIsNone(strategy.pending)
+        finally:
+            strategy.detach()
+            right.close()
+            left.close()
+            client.oauth_manager.mclient.close()
 
 
 if __name__ == "__main__":

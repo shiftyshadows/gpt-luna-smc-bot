@@ -11,7 +11,7 @@ from os import getenv, path
 from flask import Flask, jsonify, send_from_directory, request
 from src.database import init_db
 from src.api.routes.Oauth import get_valid_token
-from utils.jwt_utils import generate_jwt, decode_jwt
+from src.utils.jwt_utils import generate_jwt, decode_jwt
 from src.utils.jwt_auth import token_required
 import src  # ✅ Ensures `app_views` is registered
 

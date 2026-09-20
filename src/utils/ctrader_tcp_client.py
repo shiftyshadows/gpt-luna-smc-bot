@@ -67,6 +67,7 @@ class CTraderTCPClient:
 
         self.access_token = None
         self._recv_buffer = b""
+        self._dispatch_buffer = ""
 
     def connect(self):
         """
@@ -476,46 +477,47 @@ class CTraderTCPClient:
         """
         start = time()
         json_objects = []
-        start_index = 0
-        buffer = ""
+        buffer = self._dispatch_buffer
+
+        def decode_complete_objects(text):
+            decoder = json.JSONDecoder()
+            objects = []
+            while text.lstrip():
+                stripped = text.lstrip()
+                try:
+                    obj, index = decoder.raw_decode(stripped)
+                except json.JSONDecodeError:
+                    break
+                objects.append(obj)
+                text = stripped[index:]
+            return objects, text
 
 
         with self.socket_lock: # <--- Start Lock
-            while time() - start < timeout:
-                chunk = self.client.recv(4096).decode("utf-8")
-                if not chunk:
-                    break
-                try:
-                    chunk_json = json.loads(chunk.strip())
-                    if chunk_json.get("payloadType") != payload_type:
-                        print("💓 Ignoring Heartbeat...")
-                        continue
-                except json.JSONDecodeError:
-                    pass
-
-                buffer += chunk
-                if buffer.endswith("\n"):
-                    break
-            print("📥 Raw Received:", repr(buffer))
-
-            while True:
-                # Find the start of the next JSON object
-                next_start = buffer.find('{"payloadType":', start_index + 1)
-                if next_start == -1:
-                    break
-                # Extract the current JSON object
-                json_str = buffer[start_index:next_start]
-                json_objects.append(json_str)
-                start_index = next_start
-            # Add the last JSON object
-            json_objects.append(buffer[start_index:])
-            # print(json_objects)
-            logging.info(f"✅ Returning depth events:")
-            objs = []
-            for obj in json_objects:
-                obj = json.loads(obj)
-                objs.append(obj)
-            return objs
+            previous_timeout = self.client.gettimeout()
+            try:
+                while time() - start < timeout:
+                    remaining = max(0.001, timeout - (time() - start))
+                    self.client.settimeout(min(remaining, previous_timeout) if previous_timeout else remaining)
+                    try:
+                        chunk = self.client.recv(4096).decode("utf-8")
+                    except socket.timeout:
+                        break
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    decoded, remainder = decode_complete_objects(buffer)
+                    if decoded:
+                        json_objects.extend(decoded)
+                        buffer = remainder
+                        break
+            finally:
+                self.client.settimeout(previous_timeout)
+            self._dispatch_buffer = buffer
+            if not json_objects:
+                return []
+            logging.info("✅ Returning depth events:")
+            return json_objects
 
     def dispatch_messages(self, timeout=0.2):
         """The 'Pump': Reads the socket and sorts the mail."""

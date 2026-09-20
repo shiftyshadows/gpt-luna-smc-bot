@@ -144,9 +144,7 @@ class CTraderSMCStrategy:
         events = self.analyzer.process_closed_bar(bar)
         if self.pending is not None:
             self.pending.bar_count += 1
-            if self.pending.bar_count > self.config.max_setup_bars:
-                self.invalidated_setups.add(self.pending.zone_id)
-                self.pending = None
+            self._expire_pending(bar.timestamp * 60_000 if bar.timestamp < 10_000_000_000 else bar.timestamp)
         return events
 
     def on_spot(self, bid: float, ask: float, timestamp_ms: Optional[int] = None) -> Optional[dict[str, Any]]:
@@ -154,9 +152,10 @@ class CTraderSMCStrategy:
         if bid <= 0 or ask <= 0 or ask < bid:
             return None
         self.last_quote = {"bid": float(bid), "ask": float(ask)}
+        now = int(timestamp_ms or self._now_ms())
+        self._expire_pending(now)
         if self.pending is not None or self.open_trade_count >= self.config.max_active_trades:
             return None
-        now = int(timestamp_ms or self._now_ms())
         # Use executable-side prices for zone tests, not an untradeable midpoint.
         for direction, price in (("bullish", ask), ("bearish", bid)):
             if self.analyzer.bias != direction:
@@ -178,6 +177,15 @@ class CTraderSMCStrategy:
             self._send(payload)
             return payload
         return None
+
+    def _expire_pending(self, now_ms: int) -> None:
+        if self.pending is None:
+            return
+        timed_out = now_ms - self.pending.intercepted_at_ms >= self.config.max_setup_bars * 5 * 60 * 1000
+        bar_timed_out = self.pending.bar_count >= self.config.max_setup_bars
+        if timed_out or bar_timed_out:
+            self.invalidated_setups.add(self.pending.zone_id)
+            self.pending = None
 
     def _handle_spot(self, message: dict[str, Any]) -> None:
         payload = message.get("payload", {})
