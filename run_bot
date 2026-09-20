@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""
+Run the SMCTradingBot for a given symbol ID.
+Usage:
+    python run_bot.py 1
+"""
+
+import sys
+import logging
+from src.utils.gold_smc_trading_bot import SMCTradingBot
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+def main():
+    # Check command-line arguments
+    if len(sys.argv) < 2:
+        logging.error("❌ Please provide a symbol ID as an argument.")
+        sys.exit(1)
+
+    try:
+        symbol_id = int(sys.argv[1])
+    except ValueError:
+        logging.error("❌ Symbol ID must be an integer.")
+        sys.exit(1)
+
+    # Initialize and run the trading bot
+    bot = SMCTradingBot(symbolId=symbol_id)
+    bot.run_loop()
+
+if __name__ == "__main__":
+    main()

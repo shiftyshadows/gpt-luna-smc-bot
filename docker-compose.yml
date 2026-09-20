@@ -1,0 +1,52 @@
+#version: '3.8'
+services:
+  mongo:
+    image: mongo:4.2
+    container_name: trading_mongo
+    restart: unless-stopped
+    #ports:
+      #- "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - trading_net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  flask:
+    build: .
+    container_name: ctrader_flask
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/ctrader_db
+    volumes:
+      - ./src/data:/app/src/data
+    depends_on:
+      mongo:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - trading_net
+
+networks:
+  trading_net:
+    driver: bridge
+
+volumes:
+  mongo_data:

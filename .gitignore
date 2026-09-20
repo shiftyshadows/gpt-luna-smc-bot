@@ -1,0 +1,18 @@
+# Python and general ignores
+__pycache__/
+run.py
+*.swp
+*.pyc
+*.pyo
+*.pyd
+.env
+.env*
+.venv
+.ipynb_checkpoints
+logs/
+.venv/
+tick_data_csv/
+*.csv
+*.pkl
+*.npy
+#*.keras
