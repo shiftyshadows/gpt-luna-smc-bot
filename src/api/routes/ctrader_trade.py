@@ -253,28 +253,46 @@ def subscribe_depth(symbol_id):
             return jsonify({"error": result}), 401
 
 
-    # 2) Send TCP Request
-    while depth_client.is_connected():
+    with depth_client.depth_subscription_lock:
+        # cTrader subscriptions are idempotent, but repeated requests still
+        # create needless traffic and can start overlapping readers.
+        if depth_client.is_depth_subscribed(symbol_id):
+            _start_depth_listener(symbol_id)
+            return {"status": "success", "message": f"Depth Subscription Confirmed for Symbol {symbol_id}"}
+
+        if not depth_client.is_connected():
+            return jsonify({"status": "error", "details": "Depth client is not connected"}), 503
+
         sd = SubscribeDepthRequest(depth_client.acc_authorized_no, symbol_id)
-        sd_json = sd.as_json_string()
-        depth_client.send_json(sd_json)
+        depth_client.send_json(sd.as_json_string())
         sd_response = depth_client.receive_json()
         if sd_response and sd_response.get("payloadType") == int(2157):
-            logging.info(f"🎯 Subscription Confirmed for Symbol {symbol_id}")
-            break
-        elif sd_response and sd_response.get("payloadType") == int(2142):  # ProtoOAErrorRes
+            depth_client.mark_depth_subscribed(symbol_id)
+            logging.info("Depth subscription confirmed for symbol %s", symbol_id)
+            _start_depth_listener(symbol_id)
+            return {"status": "success", "message": f"Depth Subscription Confirmed for Symbol {symbol_id}"}
+        if sd_response and sd_response.get("payloadType") == int(2142):  # ProtoOAErrorRes
             desc = sd_response.get("payload", {}).get("description", "Unknown error")
             return jsonify({"status": "error", "details": desc}), 400
-    # Start the background listener now that we know we're subbed
-    if not getattr(depth_client, 'is_listening_dom', False):
-        thread = threading.Thread(
-            target=dom_stream_worker,
-            args=(depth_client, order_book),
-            daemon=True
-        )
-        depth_client.is_listening_dom = True
-        thread.start()
-    return   {"status": "success", "message": f"Depth Subscription Confirmed for Symbol {symbol_id}"}
+
+        return jsonify({"status": "error", "details": "Timeout waiting for depth subscription"}), 504
+
+
+def _start_depth_listener(symbol_id):
+    """Start one queue consumer for depth events. Caller holds subscription lock."""
+    worker = getattr(depth_client, "depth_worker_thread", None)
+    if worker is not None and worker.is_alive():
+        return
+
+    depth_client.is_listening_dom = True
+    worker = threading.Thread(
+        target=dom_stream_worker,
+        args=(depth_client, order_book, symbol_id),
+        daemon=True,
+        name=f"ctrader-depth-{symbol_id}",
+    )
+    depth_client.depth_worker_thread = worker
+    worker.start()
 
 
 @app_views.route("/ctrader/reconcile", methods=["GET"])
@@ -577,8 +595,14 @@ def unsubscribe_depth(symbol_id):
         usd = UnSubscribeDepthRequest(depth_client.acc_authorized_no, symbol_id)
         usd_json = usd.as_json_string()
 
-        # 2. Allow another worker thread loop
-        depth_client.is_listening_dom = False
+        # Stop and join current worker before this route reads unsubscribe reply.
+        with depth_client.depth_subscription_lock:
+            depth_client.is_listening_dom = False
+            worker = getattr(depth_client, "depth_worker_thread", None)
+            if worker is not None and worker.is_alive() and worker is not threading.current_thread():
+                worker.join(timeout=1.0)
+            depth_client.depth_worker_thread = None
+
         with order_book.lock:
             order_book.bids.clear()
             order_book.asks.clear()
@@ -591,6 +615,7 @@ def unsubscribe_depth(symbol_id):
 
             payload_type = usd_response.get("payloadType")
             if payload_type == 2159:
+                depth_client.clear_depth_subscription(symbol_id)
                 logging.info(f"🛑 Unsubscribed from symbol {symbol_id} and cleaned up worker.")
                 return jsonify({"status": "success", "message": "Unsubscribed and worker stopped"}), 200
 

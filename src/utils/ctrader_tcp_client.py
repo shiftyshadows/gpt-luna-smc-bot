@@ -60,6 +60,9 @@ class CTraderTCPClient:
         self.socket_lock = RLock() # 🔒 The "Talking Stick"
         self.main_queue = Queue(maxsize=100)
         self.depth_queue = Queue(maxsize=2000)
+        self.depth_subscription_lock = RLock()
+        self.depth_subscribed_symbols = set()
+        self.depth_worker_thread = None
         # Consumers such as the SMC strategy can observe packets without
         # opening a second competing socket reader. The main queue remains
         # populated for existing route consumers.
@@ -396,6 +399,9 @@ class CTraderTCPClient:
         self.acc_authorized = False
         self.acc_authorized_no = None
         self._heartbeat_stop.set()
+        with self.depth_subscription_lock:
+            self.depth_subscribed_symbols.clear()
+            self.is_listening_dom = False
 
         # 2. Attempt a clean SSL shutdown.
         try:
@@ -490,7 +496,6 @@ class CTraderTCPClient:
             self._dispatch_buffer = buffer
             if not json_objects:
                 return []
-            logging.info("✅ Returning depth events:")
             return json_objects
 
     def dispatch_messages(self, timeout=0.2):
@@ -506,7 +511,8 @@ class CTraderTCPClient:
                     # Non-blocking put to avoid slowing down the pump if depth lags
                     try:
                         self.depth_queue.put_nowait(packet)
-                    except: pass
+                    except Full:
+                        logging.warning("Depth queue full; dropping payload type %s", p_type)
                 else:
                     # Everything else goes to Main (2157, 2158, 2142, etc.)
                     for handler in tuple(self.message_handlers):
@@ -526,6 +532,21 @@ class CTraderTCPClient:
         with self.socket_lock:
             if handler not in self.message_handlers:
                 self.message_handlers.append(handler)
+
+    def is_depth_subscribed(self, symbol_id: int) -> bool:
+        """Return whether this client has an active depth subscription."""
+        with self.depth_subscription_lock:
+            return int(symbol_id) in self.depth_subscribed_symbols
+
+    def mark_depth_subscribed(self, symbol_id: int) -> None:
+        """Record a confirmed depth subscription exactly once."""
+        with self.depth_subscription_lock:
+            self.depth_subscribed_symbols.add(int(symbol_id))
+
+    def clear_depth_subscription(self, symbol_id: int) -> None:
+        """Forget a depth subscription after a confirmed unsubscribe."""
+        with self.depth_subscription_lock:
+            self.depth_subscribed_symbols.discard(int(symbol_id))
 
     def remove_message_handler(self, handler):
         """Unregister a previously attached packet handler."""

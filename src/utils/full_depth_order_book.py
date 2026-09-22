@@ -69,6 +69,14 @@ class FullDepthOrderBook:
         bids, asks = self.get_full_depth()
         return bids[:depth], asks[:depth]
 
+    def get_top_of_book(self):
+        """Return best bid, best ask, and total quote count."""
+        with self.lock:
+            best_bid = max((price for price, _ in self.bids.values()), default=None)
+            best_ask = min((price for price, _ in self.asks.values()), default=None)
+            level_count = len(self.bids) + len(self.asks)
+        return best_bid, best_ask, level_count
+
     def get_imbalance(self, depth=5):
         """
         Calculates the Volume Imbalance at the top of the book. 
@@ -195,6 +203,7 @@ class FullDepthOrderBook:
             "wap_bid": wap_bid,
             "wap_ask": wap_ask,
             "cumulative_depth": bid_vol + ask_vol,
+            "depth_levels": len(top_bids) + len(top_asks),
             "hollow_ask": hollow_ask,
             "hollow_bid": hollow_bid,
             "signal": "VALID" if (bid_vol + ask_vol > min_depth_threshold) else "SHALLOW"
