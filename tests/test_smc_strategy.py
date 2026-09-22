@@ -1,6 +1,7 @@
 import unittest
 import socket
 import runpy
+from os import environ
 
 from src.strategy.ctrader_smc_strategy import CTraderSMCStrategy
 from src.strategy.smc_lee_ready import (
@@ -209,6 +210,24 @@ class LeeReadyAndSMCTest(unittest.TestCase):
         module = runpy.run_path("run_bot")
         with self.assertRaises(SystemExit):
             module["parse_args"](["--history-days", "0"])
+
+    def test_run_bot_parser_rejects_invalid_environment_defaults(self):
+        module = runpy.run_path("run_bot")
+        previous = {
+            name: environ.get(name)
+            for name in ("SMC_HISTORY_DAYS", "CTRADER_EQUITY")
+        }
+        environ["SMC_HISTORY_DAYS"] = "not-a-number"
+        environ["CTRADER_EQUITY"] = "also-not-a-number"
+        try:
+            with self.assertRaises(SystemExit):
+                module["parse_args"]([])
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    environ.pop(name, None)
+                else:
+                    environ[name] = value
 
 
 if __name__ == "__main__":

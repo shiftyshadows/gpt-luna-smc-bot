@@ -42,6 +42,23 @@ def positive_float(value: str) -> float:
     return parsed
 
 
+def environment_default(name: str, default: str | None = None) -> str | None:
+    """Return environment text so argparse can validate it with its type."""
+    value = os.getenv(name)
+    return default if value in (None, "") else value
+
+
+def equity_environment_default() -> str | None:
+    """Treat zero equity as unset while leaving other values to argparse."""
+    value = environment_default("CTRADER_EQUITY")
+    if value is None:
+        return None
+    try:
+        return None if float(value) == 0 else value
+    except ValueError:
+        return value
+
+
 def load_config(path: str) -> SMCConfig:
     with open(path, "r", encoding="utf-8") as config_file:
         values: dict[str, Any] = json.load(config_file)
@@ -54,7 +71,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "symbol_id",
         nargs="?",
         type=positive_int,
-        default=int(os.getenv("CTRADER_SYMBOL_ID", "41")),
+        default=environment_default("CTRADER_SYMBOL_ID", "41"),
         help="cTrader symbol ID, default: CTRADER_SYMBOL_ID or 41",
     )
     parser.add_argument(
@@ -65,13 +82,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--equity",
         type=positive_float,
-        default=float(os.getenv("CTRADER_EQUITY", "0")) or None,
+        default=equity_environment_default(),
         help="account equity used for risk sizing, or CTRADER_EQUITY",
     )
     parser.add_argument(
         "--history-days",
         type=positive_int,
-        default=int(os.getenv("SMC_HISTORY_DAYS", "30")),
+        default=environment_default("SMC_HISTORY_DAYS", "30"),
         help="historical 5m lookback in days",
     )
     return parser.parse_args(argv)

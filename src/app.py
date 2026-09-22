@@ -75,10 +75,10 @@ def get_token():
 
 
 @app.route("/api/protected", methods=["GET"])
-#@token_required
+@token_required
 def protected_resource():
     """
-    Example API endpoint that requires a valid access token.
+    Return a valid cTrader token to an authenticated machine.
     """
 
     # 1. Get the raw result (could be a Response object OR a tuple)

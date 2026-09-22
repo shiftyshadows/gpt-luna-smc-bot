@@ -239,21 +239,14 @@ class CTraderTCPClient:
 
     def get_access_token(self):
         """
-        Retrieves the access token from `/api/protected`.
+        Retrieves the access token directly from OAuthManager.
 
         Returns:
             str: The valid access token, or None if retrieval fails.
         """
         try:
-            response = requests.get("http://localhost:8000/api/protected", timeout=10)
-            response_data = response.json()
-
-            if "error" in response_data:
-                return None
-
-            return response_data["token"]
-
-        except requests.exceptions.RequestException as e:
+            return self.oauth_manager.get_access_token()
+        except Exception as e:
             logging.error(f"❌ Error retrieving access token: {e}")
             return None
 
