@@ -145,14 +145,29 @@ class SMCConfig:
             raise ValueError("pivot_left and pivot_right must be positive")
         if self.atr_period < 1 or self.ob_lookback < 1:
             raise ValueError("atr_period and ob_lookback must be positive")
+        if self.max_zones < 1 or self.max_setup_bars < 1 or self.max_active_trades < 1:
+            raise ValueError("zone, setup-bar, and active-trade limits must be positive")
         if not 0 < self.lee_ready_threshold <= 1:
             raise ValueError("lee_ready_threshold must be in (0, 1]")
         if self.risk_percentage <= 0 or self.target_rr <= 0:
             raise ValueError("risk_percentage and target_rr must be positive")
         if self.tick_timeout_ms < 1 or self.max_tick_pages < 1:
             raise ValueError("tick timeout and page limit must be positive")
-        if self.atr_buffer_multiplier < 0 or self.value_per_price_unit <= 0:
-            raise ValueError("ATR buffer and value_per_price_unit are invalid")
+        if (
+            not isfinite(self.price_scale)
+            or self.price_scale <= 0
+            or self.atr_buffer_multiplier < 0
+            or not isfinite(self.value_per_price_unit)
+            or self.value_per_price_unit <= 0
+        ):
+            raise ValueError("price scale, ATR buffer, and value_per_price_unit are invalid")
+        if (
+            self.volume_step <= 0
+            or self.minimum_volume <= 0
+            or self.maximum_volume <= 0
+            or self.minimum_volume > self.maximum_volume
+        ):
+            raise ValueError("volume step and volume limits are invalid")
 
 
 @dataclass(frozen=True)

@@ -28,7 +28,12 @@ from time import time
 
 
 #load_dotenv()
-ct_client_live = getenv("CTRADER_LIVE_STATUS").lower() == "true"
+ct_client_live = getenv("CTRADER_LIVE_STATUS", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 ctrader_client = CTraderTCPClient(live_account = ct_client_live)
 depth_client = CTraderTCPClient(live_account = ct_client_live)
@@ -36,9 +41,22 @@ order_book = FullDepthOrderBook()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+
+def _env_int(name, default):
+    """Read an integer environment setting without breaking module import."""
+    raw_value = getenv(name)
+    if raw_value in (None, ""):
+        return default
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        logging.warning("Invalid %s=%r; using %s", name, raw_value, default)
+        return default
+
+
 # Directory to save CSV files
 CSV_DIR_TICK = "src/data/raw/tick_data"
-CSV_DIR_BAR = "src/data/raw/bar_data" if int(getenv("BOT_PORT")) == 8000 else "src/data_2/raw/bar_data"
+CSV_DIR_BAR = "src/data/raw/bar_data" if _env_int("BOT_PORT", 8000) == 8000 else "src/data_2/raw/bar_data"
 CSV_DIR_SYMBOLS = "src/data/raw/broker_data"
 CSV_DIR_SYMBOL_INFO = "src/data/raw/broker_data/symbols_data"
 CSV_DIR_SPOT_EVENTS = "src/data/raw/spot_events"

@@ -23,6 +23,28 @@ class FakeClient:
 
 
 class LeeReadyAndSMCTest(unittest.TestCase):
+    def test_config_rejects_non_positive_limits(self):
+        for field in ("max_zones", "max_setup_bars", "max_tick_pages", "max_active_trades"):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    SMCConfig(**{field: 0})
+                with self.assertRaises(ValueError):
+                    SMCConfig(**{field: -1})
+
+    def test_config_rejects_invalid_volume_and_price_settings(self):
+        invalid_settings = (
+            {"volume_step": 0},
+            {"minimum_volume": 0},
+            {"maximum_volume": -1},
+            {"minimum_volume": 2000, "maximum_volume": 1000},
+            {"price_scale": 0},
+            {"value_per_price_unit": 0},
+        )
+        for settings in invalid_settings:
+            with self.subTest(settings=settings):
+                with self.assertRaises(ValueError):
+                    SMCConfig(**settings)
+
     def test_lee_ready_is_volume_weighted_and_uses_quote_midpoint(self):
         result = calculate_lee_ready_score([
             {"price": 101.0, "bid": 100.0, "ask": 100.5, "volume": 3},

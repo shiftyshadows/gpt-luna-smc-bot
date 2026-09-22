@@ -8,6 +8,7 @@
 
 from dotenv import load_dotenv
 from os import getenv, path
+import logging
 from flask import Flask, jsonify, send_from_directory, request
 from src.database import init_db
 from src.api.routes.Oauth import get_valid_token
@@ -113,4 +114,5 @@ if __name__ == "__main__":
     - The application is accessible at http://127.0.0.1:8000.
     """
     logging.info("🚀 Starting Flask Application...")
-    app.run(host='0.0.0.0', port=8000, debug=True)
+    debug = getenv("FLASK_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
+    app.run(host='0.0.0.0', port=8000, debug=debug)

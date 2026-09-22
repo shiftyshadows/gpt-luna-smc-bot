@@ -1,6 +1,5 @@
 # Python and general ignores
 __pycache__/
-run.py
 *.swp
 *.pyc
 *.pyo
