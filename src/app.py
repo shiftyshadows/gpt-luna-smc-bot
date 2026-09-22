@@ -13,7 +13,7 @@ from src.database import init_db
 from src.api.routes.Oauth import get_valid_token
 from src.utils.jwt_utils import generate_jwt, decode_jwt
 from src.utils.jwt_auth import token_required
-import src  # ✅ Ensures `app_views` is registered
+from src.views import app_views
 
 # ✅ Load environment variables
 load_dotenv()
@@ -32,8 +32,8 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"  # Prevent cross-site leaks
 # ✅ Initialize MongoDB
 init_db(app)
 
-# ✅ Import `src` to ensure blueprints are registered
-# import src  # ✅ Ensures `app_views` is registered
+# ✅ Register API routes after route modules attach them to the blueprint.
+app.register_blueprint(app_views)
 
 # ✅ Example Usage Inside Other Routes
 # Issue a token

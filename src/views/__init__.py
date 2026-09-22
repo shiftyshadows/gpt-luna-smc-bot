@@ -13,3 +13,5 @@ app_views = Blueprint("app_views", __name__, url_prefix="/api")
 
 # ✅ Import routes after app_views is defined (prevents circular imports)
 from src.api.routes import Oauth  # ✅ This will attach decorated routes automatically
+from src.api.routes import ctrader  # Attach cTrader connection routes
+from src.api.routes import ctrader_trade  # Attach cTrader trading routes
