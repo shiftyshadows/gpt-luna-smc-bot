@@ -11,9 +11,10 @@ LOG = logging.getLogger(__name__)
 class DepthLogLimiter:
     """Allow one top-of-book DEBUG record per interval and only on change."""
 
-    def __init__(self, interval_seconds=1.0, clock=monotonic):
+    def __init__(self, interval_seconds=1.0, clock=monotonic, only_on_change=True):
         self.interval_seconds = float(interval_seconds)
         self.clock = clock
+        self.only_on_change = only_on_change
         self.last_logged_at = None
         self.last_top = None
 
@@ -25,11 +26,18 @@ class DepthLogLimiter:
         if self.last_logged_at is not None and now - self.last_logged_at < self.interval_seconds:
             return False
         top = (best_bid, best_ask)
-        if top == self.last_top:
+        if self.only_on_change and top == self.last_top:
             return False
         self.last_logged_at = now
         self.last_top = top
         return True
+
+    def is_due(self):
+        """Return whether the next status check can emit a record."""
+        return (
+            self.last_logged_at is None
+            or self.clock() - self.last_logged_at >= self.interval_seconds
+        )
 
 
 def _depth_signature(new_quotes, deleted_quotes):
@@ -41,15 +49,24 @@ def _depth_signature(new_quotes, deleted_quotes):
     )
 
 
-def dom_stream_worker(client, book, symbol_id=None, log_interval_seconds=1.0):
+def dom_stream_worker(
+    client,
+    book,
+    symbol_id=None,
+    log_interval_seconds=1.0,
+    status_interval_seconds=10.0,
+):
     """
        Listens to the 2155 stream and updates the book.
     """
     LOG.info("DOM listener started for symbol %s", symbol_id)
-    limiter = DepthLogLimiter(log_interval_seconds)
+    change_limiter = DepthLogLimiter(log_interval_seconds)
+    status_limiter = DepthLogLimiter(status_interval_seconds, only_on_change=False)
     last_signature = None
     last_signature_at = 0.0
     dedupe_window_seconds = 0.1
+    total_updates = 0
+    total_duplicates = 0
     try:
         while client.is_connected() and getattr(client, "is_listening_dom", False):
             # One socket reader pumps packets. This worker only consumes its queue.
@@ -79,20 +96,26 @@ def dom_stream_worker(client, book, symbol_id=None, log_interval_seconds=1.0):
                 except Exception:
                     LOG.exception("Malformed depth event ignored")
 
-            if processed_count:
+            total_updates += processed_count
+            total_duplicates += deduplicated_count
+            if processed_count or deduplicated_count or status_limiter.is_due():
                 top_of_book = book.get_top_of_book()
-                if limiter.allow(top_of_book):
+                log_status = status_limiter.allow(top_of_book)
+                log_change = change_limiter.allow(top_of_book) if processed_count else False
+                if log_status or log_change:
                     metrics = book.snapshot_metrics()
-                    LOG.debug(
-                        "[DEPTH] symbol=%s top_bid=%s top_ask=%s spread=%s "
-                        "depth_levels=%s updates=%s duplicates_suppressed=%s",
+                    log_method = LOG.info if log_status else LOG.debug
+                    log_method(
+                        "[DEPTH] mode=%s symbol=%s top_bid=%s top_ask=%s spread=%s "
+                        "depth_levels=%s updates_total=%s duplicates_suppressed_total=%s",
+                        "status" if log_status else "change",
                         symbol_id,
                         metrics["best_bid"],
                         metrics["best_ask"],
                         metrics["spread"],
                         top_of_book[2],
-                        processed_count,
-                        deduplicated_count,
+                        total_updates,
+                        total_duplicates,
                         extra={
                             "event_type": "depth_update",
                             "symbol_id": symbol_id,

@@ -54,6 +54,21 @@ class DepthPipelineTest(unittest.TestCase):
         self.assertFalse(limiter.allow((1.0, 1.1, 3)))
         self.assertTrue(limiter.allow((1.01, 1.1, 3)))
 
+    def test_depth_status_limiter_repeats_without_top_change(self):
+        now = [0.0]
+        limiter = DepthLogLimiter(
+            interval_seconds=1.0,
+            clock=lambda: now[0],
+            only_on_change=False,
+        )
+
+        self.assertTrue(limiter.allow((1.0, 1.1, 2)))
+        now[0] = 0.5
+        self.assertFalse(limiter.allow((1.0, 1.1, 2)))
+        now[0] = 1.0
+        self.assertTrue(limiter.is_due())
+        self.assertTrue(limiter.allow((1.0, 1.1, 2)))
+
     def test_order_book_exposes_structured_top_of_book(self):
         book = FullDepthOrderBook()
         book.apply_update(
