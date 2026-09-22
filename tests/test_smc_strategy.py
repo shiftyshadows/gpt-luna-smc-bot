@@ -229,6 +229,13 @@ class LeeReadyAndSMCTest(unittest.TestCase):
                 else:
                     environ[name] = value
 
+    def test_positive_float_rejects_non_finite_values(self):
+        module = runpy.run_path("run_bot")
+        for value in ("nan", "inf", "-inf"):
+            with self.subTest(value=value):
+                with self.assertRaises(module["argparse"].ArgumentTypeError):
+                    module["positive_float"](value)
+
 
 if __name__ == "__main__":
     unittest.main()

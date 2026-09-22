@@ -69,7 +69,10 @@ def new_order():
     if error is not None:
         return error
     symbol_id = data.get("symbolId")
-    direction = data.get("direction", "BUY").upper()
+    direction = data.get("direction", "BUY")
+    if not isinstance(direction, str) or direction.upper() not in {"BUY", "SELL"}:
+        return jsonify({"error": "direction must be BUY or SELL"}), 400
+    direction = direction.upper()
     trade_side = 1 if direction == "BUY" else 2
     order_volume = int(data.get("volume", 100000))
     od_type = str(data.get("od_type", ""))

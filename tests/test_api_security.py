@@ -45,6 +45,17 @@ class ApiSecurityTest(unittest.TestCase):
                 response = app.test_client().post(route, json=[], headers=headers)
                 self.assertEqual(response.status_code, 400)
 
+    def test_new_order_rejects_unknown_direction(self):
+        ctrader_client.acc_authorized = True
+        headers = {"Authorization": f"Bearer {generate_jwt('bot_1')}"}
+        response = app.test_client().post(
+            "/api/ctrader/new_order",
+            json={"direction": "HOLD"},
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "direction must be BUY or SELL")
+
 
 if __name__ == "__main__":
     unittest.main()

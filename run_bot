@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from math import isfinite
 import os
 import signal
 import time
@@ -37,7 +38,7 @@ def positive_float(value: str) -> float:
         parsed = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be a number") from exc
-    if parsed <= 0:
+    if not isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return parsed
 
