@@ -4,6 +4,14 @@ from flask import request, jsonify
 from src.utils.jwt_utils import decode_jwt
 
 
+def _extract_bearer_token(authorization: str) -> str | None:
+    """Return the token from a valid two-part Bearer header."""
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1]
+
+
 def token_required(f):
     """
        This decorator to protect Flask routes using JWT Bearer authentication.
@@ -20,12 +28,11 @@ def token_required(f):
     """
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = None
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
+        token = _extract_bearer_token(auth)
+        if token is None:
             return jsonify({"message": "Missing or invalid token"}), 401
 
-        token = auth.split(" ")[1]
         payload = decode_jwt(token)
         if not payload:
             return jsonify({"message": "Invalid or expired token"}), 401
