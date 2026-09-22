@@ -15,7 +15,9 @@ for name, value in {
     os.environ.setdefault(name, value)
 
 from src.app import app
+from src.api.routes.ctrader import ctrader_client
 from src.utils.ctrader_tcp_client import CTraderTCPClient
+from src.utils.jwt_utils import generate_jwt
 
 
 class ApiSecurityTest(unittest.TestCase):
@@ -28,6 +30,20 @@ class ApiSecurityTest(unittest.TestCase):
         client.oauth_manager.get_access_token = lambda: "direct-token"
         self.assertEqual(client.get_access_token(), "direct-token")
         client.oauth_manager.mclient.close()
+
+    def test_trading_routes_reject_non_object_json_bodies(self):
+        ctrader_client.acc_authorized = True
+        ctrader_client.acc_authorized_no = 1
+        headers = {"Authorization": f"Bearer {generate_jwt('bot_1')}"}
+        for route in (
+            "/api/ctrader/new_order",
+            "/api/ctrader/cancel_order",
+            "/api/ctrader/amend_position",
+            "/api/ctrader/close_position",
+        ):
+            with self.subTest(route=route):
+                response = app.test_client().post(route, json=[], headers=headers)
+                self.assertEqual(response.status_code, 400)
 
 
 if __name__ == "__main__":

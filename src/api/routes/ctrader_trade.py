@@ -36,6 +36,14 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
+def _json_object():
+    """Parse a request body and require a JSON object for trading routes."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, (jsonify({"error": "Request body must be a JSON object"}), 400)
+    return data, None
+
+
 GMT_PLUS_2 = pytz.timezone("Etc/GMT-2")
 N_DAYS = 90
 
@@ -57,7 +65,9 @@ def new_order():
             return jsonify({"error": result}), 401
 
     # Parse request data
-    data = request.get_json()
+    data, error = _json_object()
+    if error is not None:
+        return error
     symbol_id = data.get("symbolId")
     direction = data.get("direction", "BUY").upper()
     trade_side = 1 if direction == "BUY" else 2
@@ -206,7 +216,9 @@ def cancel_order():
             return jsonify({"error": result}), 401
 
     # 2) Parse request data
-    data = request.get_json()
+    data, error = _json_object()
+    if error is not None:
+        return error
     order_id = data.get("orderId")
 
     # 3) Send TCP Request
@@ -367,7 +379,9 @@ def amend_position():
             return jsonify({"error": result}), 401
 
     # 2) Parse request data
-    data = request.get_json()
+    data, error = _json_object()
+    if error is not None:
+        return error
     position_id = data.get("positionId")
     stop_loss = data.get("stopLoss")
     take_profit = data.get("takeProfit")
@@ -427,7 +441,9 @@ def close_position():
     }
 
     # 2) Parse request data
-    data = request.get_json()
+    data, error = _json_object()
+    if error is not None:
+        return error
     try:
         position_id = int(data["positionId"])
         volume = int(data["volume"])
