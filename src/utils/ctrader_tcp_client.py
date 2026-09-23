@@ -10,6 +10,7 @@ import time
 import logging
 import requests
 import struct
+from typing import Callable, Optional
 from os import getenv
 from time import sleep, time
 from queue import Full, Queue
@@ -71,6 +72,67 @@ class CTraderTCPClient:
         self.access_token = None
         self._recv_buffer = b""
         self._dispatch_buffer = ""
+        # Requests made by Flask routes share this socket with the strategy
+        # dispatcher.  Keep the transaction lock separate from socket_lock so
+        # a route cannot race another route while it is matching replies.
+        self.request_lock = RLock()
+
+    @staticmethod
+    def _message_id(message):
+        if isinstance(message, dict):
+            return message.get("clientMsgId")
+        try:
+            return json.loads(message).get("clientMsgId")
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+    def request_reply(
+        self,
+        message,
+        matcher: Optional[Callable[[dict], bool]] = None,
+        timeout: float = 30,
+    ):
+        """Send one request and return only its correlated reply.
+
+        The strategy dispatcher and HTTP routes share one TCP connection.  A
+        route must therefore not call ``receive_json`` and accept whichever
+        packet happens to arrive next.  This transaction owns the read side
+        until its reply arrives, dispatching unrelated packets normally so
+        strategy subscribers keep receiving them.
+        """
+        if isinstance(message, str):
+            request = json.loads(message)
+        else:
+            request = dict(message)
+        request_id = self._message_id(request)
+        if request_id is None:
+            request_id = str(uuid.uuid4())
+            request["clientMsgId"] = request_id
+
+        predicate = matcher or (lambda packet: packet.get("clientMsgId") == request_id)
+        deadline = time() + timeout
+        with self.request_lock:
+            self.send_json(request)
+            while time() < deadline:
+                packet = self.receive_json()
+                if packet is None:
+                    return None
+                if predicate(packet):
+                    return packet
+                self._dispatch_unmatched_packet(packet)
+        return None
+
+    def _dispatch_unmatched_packet(self, packet):
+        """Preserve packets belonging to the dispatcher or another consumer."""
+        for handler in tuple(self.message_handlers):
+            try:
+                handler(packet)
+            except Exception:
+                logging.exception("Message handler failed")
+        try:
+            self.main_queue.put_nowait(packet)
+        except Full:
+            logging.warning("Main message queue full; dropping payload type %s", packet.get("payloadType"))
 
     def connect(self):
         """

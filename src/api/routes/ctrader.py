@@ -54,6 +54,19 @@ def _env_int(name, default):
         return default
 
 
+def _request_reply(message, payload_type):
+    """Read only the response correlated with this route's request."""
+    request_id = json.loads(message).get("clientMsgId")
+
+    def matches(response):
+        response_id = response.get("clientMsgId")
+        if response_id is not None:
+            return response_id == request_id
+        return response.get("payloadType") in {payload_type, 2142}
+
+    return ctrader_client.request_reply(message, matcher=matches)
+
+
 # Directory to save CSV files
 CSV_DIR_TICK = "src/data/raw/tick_data"
 CSV_DIR_BAR = "src/data/raw/bar_data" if _env_int("BOT_PORT", 8000) == 8000 else "src/data_2/raw/bar_data"
@@ -95,23 +108,20 @@ def fetch_symbol_list():
         # sl = SymbolListRequest(ctrader_client.debug_account)
         sl = SymbolListRequest(ctrader_client.acc_authorized_no)
         sl_json = sl.as_json_string()
-        ctrader_client.send_json(sl_json)
+        sl_response = _request_reply(sl_json, 2115)
+        if not sl_response:
+            return jsonify({"status": "error", "details": "Timeout waiting for cTrader response"}), 504
 
-        for _ in range(10):
-            sl_response = ctrader_client.receive_json()
-            if not sl_response:
-                continue
+        payload_type = sl_response.get("payloadType")
+        if payload_type == 2115:
+            return jsonify({
+                "message": "Symbol List data retrieved successfully.",
+                "data": sl_response})
+        if payload_type == 2142:
+            desc = sl_response.get("payload", {}).get("description", "Unknown error")
+            return jsonify({"status": "error", "details": desc}), 400
 
-            payload_type = sl_response.get("payloadType")
-            if payload_type == 2115:
-                return jsonify({
-                    "message": "Symbol List data retrieved successfully.",
-                    "data": sl_response})
-            elif payload_type == 2142:
-                desc = sl_response.get("payload", {}).get("description", "Unknown error")
-                return jsonify({"status": "error", "details": desc}), 400
-
-        return jsonify({"status": "error", "details": "Timeout waiting for cTrader response"}), 504
+        return jsonify({"status": "error", "details": "Unexpected cTrader response"}), 502
 
     except Exception as e:
             logging.error(f"❌ TCP Request failed: {e}")
