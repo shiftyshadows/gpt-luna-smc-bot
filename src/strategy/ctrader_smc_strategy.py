@@ -19,7 +19,7 @@ from src.utils.messages.reconcile_request import ReconcileRequest
 from src.utils.messages.subscribe_live_trendbars import SubscribeLiveTrendbarsRequest
 from src.utils.messages.subscribe_spot_request import SubscribeSpotRequest
 from src.utils.messages.tick_data_request import TickDataRequest
-from src.utils.messages.trendbars_request import TrendbarsRequest
+from src.utils.messages.h_data_request import HistoricalDataRequest
 
 from .smc_lee_ready import (
     Bar,
@@ -116,12 +116,12 @@ class CTraderSMCStrategy:
         self._send(SubscribeSpotRequest(self.account_id, self.symbol_id).as_json_string())
         self._send(SubscribeLiveTrendbarsRequest(self.account_id, self.symbol_id, period=5).as_json_string())
         self._send(
-            TrendbarsRequest(
+            HistoricalDataRequest(
                 self.account_id,
-                self.symbol_id,
-                period=5,
-                from_timestamp=from_timestamp,
-                to_timestamp=to_timestamp,
+                from_timeStamp=from_timestamp,
+                to_timeStamp=to_timestamp,
+                barPeriod=5,
+                symbolId=self.symbol_id,
             ).as_json_string()
         )
 

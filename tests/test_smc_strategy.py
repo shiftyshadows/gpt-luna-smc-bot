@@ -32,6 +32,16 @@ class LeeReadyAndSMCTest(unittest.TestCase):
 
         self.assertEqual(client.sent[0]["payloadType"], 2124)
         self.assertEqual([payload["payloadType"] for payload in client.sent[1:3]], [2127, 2135])
+        history_request = client.sent[3]
+        self.assertEqual(history_request["payloadType"], 2137)
+        self.assertEqual(history_request["payload"], {
+            "ctidTraderAccountId": 42,
+            "period": 5,
+            "symbolId": 7,
+            "fromTimestamp": 900_000,
+            "toTimestamp": 1_000_000,
+        })
+        self.assertTrue(history_request["clientMsgId"])
         self.assertTrue(strategy.reconciliation_pending)
 
         strategy.handle_message({
