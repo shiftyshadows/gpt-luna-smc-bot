@@ -127,16 +127,72 @@ python3 run.py
 
 Use `run_bot` for trading. Use `run.py` only for API and authentication routes.
 
-## Docker
+## Recommended deployment topology
 
-Build and run with environment variables from a protected file:
+Run the trading bot as a systemd service on the host and run MongoDB in Docker
+Compose. This keeps the cTrader socket in one long-lived bot process while
+keeping MongoDB restartable and private to the host. The Compose API service is
+optional and is intended only for OAuth and administrative routes.
 
-```bash
-docker build -t ctrader-smc-bot .
-docker run --rm --env-file .env ctrader-smc-bot
+```text
+systemd ctrader-smc-bot  ── localhost:27017 ──>  Compose MongoDB
+        │
+        └── outbound TLS:5036 ──> demo.ctraderapi.com
+
+optional Compose API  ── internal network ──> MongoDB
+       localhost:8000 only
 ```
 
-The container command is `./run_bot`.
+The cTrader client is part of `run_bot`, not a separate container. Do not run
+the bot both from systemd and Compose because that would create competing
+strategy processes and account connections.
+
+### Install the systemd topology
+
+The deployment units assume the repository is installed at
+`/opt/ctrader-smc-bot` and that a `ctrader-bot` user exists:
+
+```bash
+sudo chown -R ctrader-bot:ctrader-bot /opt/ctrader-smc-bot
+sudo -u ctrader-bot python3 -m venv /opt/ctrader-smc-bot/.venv
+sudo -u ctrader-bot /opt/ctrader-smc-bot/.venv/bin/pip install -r /opt/ctrader-smc-bot/requirements.txt
+sudo install -d -m 0750 /etc/ctrader-smc-bot
+sudo install -m 0600 deploy/bot.env.example /etc/ctrader-smc-bot/bot.env
+# Edit /etc/ctrader-smc-bot/bot.env with real credentials. Never commit it.
+sudo install -m 0644 deploy/ctrader-mongo.service /etc/systemd/system/
+sudo install -m 0644 deploy/ctrader-smc-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ctrader-mongo.service
+sudo systemctl enable --now ctrader-smc-bot.service
+```
+
+The Mongo service publishes `127.0.0.1:27017` only. The bot environment must
+therefore use `mongodb://127.0.0.1:27017/ctrader_db`. The Mongo unit waits for
+the container health check before the bot starts.
+
+### Optional API and OAuth service
+
+The API is disabled by default. Start it only when the OAuth callback or API is
+needed, using the same protected environment file:
+
+```bash
+sudo CTRADER_ENV_FILE=/etc/ctrader-smc-bot/bot.env \
+  docker compose --profile api up -d --build
+```
+
+It binds to `127.0.0.1:8000` and uses the Compose Mongo hostname internally.
+Use a private reverse proxy or an SSH tunnel if remote OAuth access is needed.
+
+### Compose-only development commands
+
+```bash
+docker compose up -d mongo
+docker compose --profile api up -d --build
+docker compose logs -f mongo api
+```
+
+The repository `.dockerignore` excludes credentials, virtual environments,
+local databases, logs, and generated market data from image builds.
 
 ## Tests and checks
 

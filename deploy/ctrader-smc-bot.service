@@ -1,0 +1,25 @@
+[Unit]
+Description=cTrader 5-minute SMC demo bot
+Requires=ctrader-mongo.service
+After=ctrader-mongo.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ctrader-bot
+Group=ctrader-bot
+WorkingDirectory=/opt/ctrader-smc-bot
+EnvironmentFile=/etc/ctrader-smc-bot/bot.env
+Environment="PATH=/opt/ctrader-smc-bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+ExecStart=/usr/bin/env python3 /opt/ctrader-smc-bot/run_bot
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+.git/
+.gitignore
+.env
+.env.*
+.venv/
+myvenv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+logs/
+src/data/
+src/data_2/
+*.csv
+*.npy
+*.pkl
+*.log

@@ -1,0 +1,15 @@
+[Unit]
+Description=cTrader SMC MongoDB Compose service
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ctrader-smc-bot
+ExecStart=/usr/bin/docker compose -f /opt/ctrader-smc-bot/docker-compose.yml up -d mongo
+ExecStart=/bin/sh -c 'for i in $(seq 1 60); do status=$$(/usr/bin/docker inspect -f "{{.State.Health.Status}}" trading_mongo 2>/dev/null || true); if [ "$${status}" = healthy ]; then exit 0; fi; sleep 2; done; echo "MongoDB did not become healthy" >&2; exit 1'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
