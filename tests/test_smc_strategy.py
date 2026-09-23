@@ -24,6 +24,51 @@ class FakeClient:
 
 
 class LeeReadyAndSMCTest(unittest.TestCase):
+    def test_start_requests_account_reconciliation_before_market_streams(self):
+        client = FakeClient()
+        strategy = CTraderSMCStrategy(client, 42, 7, now_ms=lambda: 1_000_000)
+
+        strategy.start(from_timestamp=900_000, to_timestamp=1_000_000)
+
+        self.assertEqual(client.sent[0]["payloadType"], 2124)
+        self.assertEqual([payload["payloadType"] for payload in client.sent[1:3]], [2127, 2135])
+
+    def test_reconciliation_and_execution_events_are_keyed_by_position_id(self):
+        client = FakeClient()
+        strategy = CTraderSMCStrategy(client, 42, 7)
+
+        strategy.handle_message({
+            "payloadType": 2125,
+            "payload": {
+                "position": [{"positionId": 101}, {"positionId": "202"}],
+                "order": [{"orderId": 9, "label": "pending-entry"}],
+            },
+        })
+        self.assertEqual(set(strategy.open_positions), {101, 202})
+        self.assertEqual(strategy.open_trade_count, 2)
+        self.assertEqual(strategy.orders_in_flight, {"pending-entry": 9})
+
+        strategy.handle_message({
+            "payloadType": 2126,
+            "payload": {
+                "executionType": 7,
+                "positionId": 101,
+                "order": {"positionId": 101},
+            },
+        })
+        self.assertEqual(set(strategy.open_positions), {202})
+        self.assertEqual(strategy.open_trade_count, 1)
+
+        strategy.handle_message({
+            "payloadType": 2126,
+            "payload": {
+                "executionType": 3,
+                "order": {"orderStatus": 2, "positionId": 303},
+            },
+        })
+        self.assertEqual(set(strategy.open_positions), {202, 303})
+        self.assertEqual(strategy.open_trade_count, 2)
+
     def test_config_rejects_non_positive_limits(self):
         for field in ("max_zones", "max_setup_bars", "max_tick_pages", "max_active_trades"):
             with self.subTest(field=field):

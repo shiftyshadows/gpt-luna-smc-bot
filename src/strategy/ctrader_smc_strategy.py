@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from src.utils.messages.new_order_request import NewOrderRequest
+from src.utils.messages.reconcile_request import ReconcileRequest
 from src.utils.messages.subscribe_live_trendbars import SubscribeLiveTrendbarsRequest
 from src.utils.messages.subscribe_spot_request import SubscribeSpotRequest
 from src.utils.messages.tick_data_request import TickDataRequest
@@ -64,6 +65,7 @@ class CTraderSMCStrategy:
     ERROR_RESPONSE = 2142
     ORDER_ERROR_RESPONSE = 2132
     EXECUTION_EVENT = 2126
+    RECONCILE_RESPONSE = 2125
 
     def __init__(
         self,
@@ -82,6 +84,7 @@ class CTraderSMCStrategy:
         self.analyzer = SMCAnalyzer(self.config)
         self.equity = equity
         self.open_trade_count = 0
+        self.open_positions: dict[int, dict[str, Any]] = {}
         self.orders_in_flight: dict[str, Optional[int]] = {}
         self.pending: Optional[PendingZoneSetup] = None
         self.invalidated_setups: set[str] = set()
@@ -103,10 +106,11 @@ class CTraderSMCStrategy:
             remove_handler(self.handle_message)
 
     def start(self, *, from_timestamp: Optional[int] = None, to_timestamp: Optional[int] = None) -> None:
-        """Subscribe to 5m closed-bar events and spot events, then request history."""
+        """Reconcile account state, subscribe to events, then request history."""
         now = int(self._now_ms())
         to_timestamp = to_timestamp or now
         from_timestamp = from_timestamp or now - 30 * 24 * 60 * 60 * 1000
+        self._send(ReconcileRequest(self.account_id).as_json_string())
         self._send(SubscribeSpotRequest(self.account_id, self.symbol_id).as_json_string())
         self._send(SubscribeLiveTrendbarsRequest(self.account_id, self.symbol_id, period=5).as_json_string())
         self._send(
@@ -146,6 +150,9 @@ class CTraderSMCStrategy:
             return None
         if payload_type == self.EXECUTION_EVENT:
             self._handle_execution(message)
+            return None
+        if payload_type == self.RECONCILE_RESPONSE:
+            self._handle_reconcile(message)
             return None
         account_equity = extract_equity(message)
         if account_equity is not None:
@@ -381,28 +388,57 @@ class CTraderSMCStrategy:
             self.orders_in_flight.clear()
         LOG.error("cTrader order rejected: %s", payload)
 
+    def _handle_reconcile(self, message: dict[str, Any]) -> None:
+        payload = message.get("payload", {}) or {}
+        positions = payload.get("position") or payload.get("positions") or []
+        orders = payload.get("order") or payload.get("orders") or []
+        if isinstance(positions, dict):
+            positions = [positions]
+        if isinstance(orders, dict):
+            orders = [orders]
+        self.open_positions = {
+            position_id: position
+            for position in positions
+            if (position_id := self._position_id(position)) is not None
+        }
+        self.open_trade_count = len(self.open_positions)
+        self.orders_in_flight = {
+            label: order.get("orderId")
+            for order in orders
+            if (label := self._order_label({"order": order})) is not None
+        }
+
     def _handle_execution(self, message: dict[str, Any]) -> None:
         payload = message.get("payload", {})
         order = payload.get("order", {}) or {}
         label = self._order_label(payload)
+        execution_type = payload.get("executionType")
+        position_id = self._position_id(order) or self._position_id(payload)
         if label and label not in self.orders_in_flight:
             return
-        if label is None and len(self.orders_in_flight) != 1:
+        if label is None and len(self.orders_in_flight) != 1 and not (
+            execution_type == 7 and position_id is not None
+        ):
             return
-        if label and payload.get("executionType") == 2:
+        if label and execution_type == 2:
             self.orders_in_flight[label] = order.get("orderId")
-        elif payload.get("executionType") == 3:
+        elif execution_type == 3:
             if label:
                 self.orders_in_flight.pop(label, None)
             else:
                 self.orders_in_flight.pop(next(iter(self.orders_in_flight)), None)
             if order.get("orderStatus") == 2:
-                self.open_trade_count += 1
-        elif payload.get("executionType") == 7:
+                if position_id is not None:
+                    self.open_positions[position_id] = order
+                self.open_trade_count = len(self.open_positions)
+        elif execution_type == 7:
             if label:
                 self.orders_in_flight.pop(label, None)
             elif len(self.orders_in_flight) == 1:
                 self.orders_in_flight.clear()
+            if position_id is not None:
+                self.open_positions.pop(position_id, None)
+            self.open_trade_count = len(self.open_positions)
         account_equity = extract_equity(message)
         if account_equity is not None:
             self.equity = account_equity
@@ -413,6 +449,16 @@ class CTraderSMCStrategy:
         for value in (order.get("label"), order.get("clientOrderId"), payload.get("label")):
             if value:
                 return str(value)
+        return None
+
+    @staticmethod
+    def _position_id(payload: dict[str, Any]) -> Optional[int]:
+        for value in (payload.get("positionId"), payload.get("positionID"), payload.get("position_id")):
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return None
         return None
 
     def _find_zone(self, zone_id: str) -> Optional[FairValueGap | OrderBlock]:
