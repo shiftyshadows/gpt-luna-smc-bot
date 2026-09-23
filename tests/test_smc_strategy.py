@@ -32,6 +32,13 @@ class LeeReadyAndSMCTest(unittest.TestCase):
 
         self.assertEqual(client.sent[0]["payloadType"], 2124)
         self.assertEqual([payload["payloadType"] for payload in client.sent[1:3]], [2127, 2135])
+        self.assertTrue(strategy.reconciliation_pending)
+
+        strategy.handle_message({
+            "payloadType": 2125,
+            "payload": {"ctidTraderAccountId": 42, "position": [], "order": []},
+        })
+        self.assertFalse(strategy.reconciliation_pending)
 
     def test_reconciliation_and_execution_events_are_keyed_by_position_id(self):
         client = FakeClient()
@@ -62,8 +69,17 @@ class LeeReadyAndSMCTest(unittest.TestCase):
         strategy.handle_message({
             "payloadType": 2126,
             "payload": {
+                "executionType": 2,
+                "order": {"orderId": 10, "label": "new-entry"},
+            },
+        })
+        strategy.orders_in_flight["new-entry"] = None
+        strategy.handle_message({
+            "payloadType": 2126,
+            "payload": {
                 "executionType": 3,
-                "order": {"orderStatus": 2, "positionId": 303},
+                "order": {"orderStatus": 2, "label": "new-entry"},
+                "position": {"positionId": 303},
             },
         })
         self.assertEqual(set(strategy.open_positions), {202, 303})

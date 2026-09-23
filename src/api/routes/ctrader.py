@@ -54,17 +54,20 @@ def _env_int(name, default):
         return default
 
 
-def _request_reply(message, payload_type):
+def _request_reply(message, payload_types, matcher=None, timeout=30):
     """Read only the response correlated with this route's request."""
-    request_id = json.loads(message).get("clientMsgId")
+    request_id = message.get("clientMsgId")
+    expected_types = set(payload_types if isinstance(payload_types, (tuple, list, set)) else (payload_types,))
 
     def matches(response):
         response_id = response.get("clientMsgId")
         if response_id is not None:
             return response_id == request_id
-        return response.get("payloadType") in {payload_type, 2142}
+        if matcher is not None and matcher(response):
+            return True
+        return response.get("payloadType") in expected_types | {2142}
 
-    return ctrader_client.request_reply(message, matcher=matches)
+    return ctrader_client.request_reply(message, matcher=matches, timeout=timeout)
 
 
 # Directory to save CSV files
@@ -142,19 +145,14 @@ def fetch_symbol_data(symbol_id):
         #symbol = SymbolByIdRequest(ctrader_client.debug_account, int(symbol_id))
         symbol = SymbolByIdRequest(ctrader_client.acc_authorized_no, int(symbol_id))
         symbol_json = symbol.as_json_string()
-        ctrader_client.send_json(symbol_json)
-
-        for _ in range(10):
-            symbol_response = ctrader_client.receive_json()
-            if not symbol_response:
-                continue
-
+        symbol_response = _request_reply(symbol_json, 2117)
+        if symbol_response:
             payload_type = symbol_response.get("payloadType")
             if payload_type == 2117:
                 return jsonify({
                     "message": f"Symbol {symbol_id} data retrieved successfully.",
                     "data": symbol_response})
-            elif payload_type == 2142:
+            if payload_type == 2142:
                 desc = symbol_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400
 
@@ -178,19 +176,14 @@ def fetch_sc_list():
         #scl = SymbolCategoryListRequest(ctrader_client.debug_account)
         scl = SymbolCategoryListRequest(ctrader_client.acc_authorized_no)
         scl_json = scl.as_json_string()
-        ctrader_client.send_json(scl_json)
-
-        for _ in range(10):
-            scl_response = ctrader_client.receive_json()
-            if not scl_response:
-                continue
-
+        scl_response = _request_reply(scl_json, 2161)
+        if scl_response:
             payload_type = scl_response.get("payloadType")
             if payload_type == 2161:
                 return jsonify({
                     "message": "Symbol Category data retrieved successfully.",
                     "data": scl_response})
-            elif payload_type == 2142:
+            if payload_type == 2142:
                 desc = scl_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400
 
@@ -214,19 +207,14 @@ def fetch_ac_list():
         #acl = AssetClassListRequest(ctrader_client.debug_account)
         acl = AssetClassListRequest(ctrader_client.acc_authorized_no)
         acl_json = acl.as_json_string()
-        ctrader_client.send_json(acl_json)
-
-        for _ in range(10):
-            acl_response = ctrader_client.receive_json()
-            if not acl_response:
-                continue
-
+        acl_response = _request_reply(acl_json, 2154)
+        if acl_response:
             payload_type = acl_response.get("payloadType")
             if payload_type == 2154:
                 return jsonify({
                     "message": "Asset class data retrieved successfully.",
                     "data": acl_response})
-            elif payload_type == 2142:
+            if payload_type == 2142:
                 desc = acl_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400
 
@@ -250,19 +238,14 @@ def fetch_assets():
         #acl = AssetClassListRequest(ctrader_client.debug_account)
         al = AssetListRequest(ctrader_client.acc_authorized_no)
         al_json = al.as_json_string()
-        ctrader_client.send_json(al_json)
-
-        for _ in range(10):
-            al_response = ctrader_client.receive_json()
-            if not al_response:
-                continue
-
+        al_response = _request_reply(al_json, 2113)
+        if al_response:
             payload_type = al_response.get("payloadType")
             if payload_type == 2113:
                 return jsonify({
                     "message": "Asset List data retrieved successfully.",
                     "data": al_response})
-            elif payload_type == 2142:
+            if payload_type == 2142:
                 desc = al_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400
 
@@ -286,19 +269,14 @@ def fetch_version():
         #acl = AssetClassListRequest(ctrader_client.debug_account)
         version = VersionRequest(ctrader_client.acc_authorized_no)
         version_json = version.as_json_string()
-        ctrader_client.send_json(version_json)
-
-        for _ in range(10):
-            version_response = ctrader_client.receive_json()
-            if not version_response:
-                continue
-
+        version_response = _request_reply(version_json, 2105)
+        if version_response:
             payload_type = version_response.get("payloadType")
             if payload_type == 2105:
                 return jsonify({
                     "message": "Version data retrieved successfully.",
                     "data": version_response})
-            elif payload_type == 2142:
+            if payload_type == 2142:
                 desc = version_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400
 
@@ -359,12 +337,9 @@ def fetch_tick_data():
         tick_json = tick_request.as_json_string()
         logging.debug(f"🚀 Sending request: {tick_json}")
 
-        # 5) Send the request
-        ctrader_client.send_json(tick_json)
-
         while has_more:
-            # 6) Receive response (adjust timeout as needed)
-            tick_response = ctrader_client.receive_json()
+            # 5) Receive only the response for this page request.
+            tick_response = _request_reply(tick_json, (2146, 2155, 51))
             logging.debug(f"🚀 Received: {tick_response}")
 
             if not tick_response:
@@ -387,6 +362,14 @@ def fetch_tick_data():
                         logging.info(
                             f"✅ Fetched chunk. Updating to_timestamp to {to_timestamp}"
                         )
+                        tick_request = TickDataRequest(
+                            ctrader_client.acc_authorized_no,
+                            int(symbol_id),
+                            2,
+                            from_timestamp,
+                            to_timestamp,
+                        )
+                        tick_json = tick_request.as_json_string()
             elif py_type == 2142:
                 desc = tick_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400
@@ -471,11 +454,9 @@ def fetch_bar_data():
             symbol_id
         )
         bar_json = bar_request.as_json_string()
-        ctrader_client.send_json(bar_json)
-
 
         while has_more:
-            bar_response = ctrader_client.receive_json()
+            bar_response = _request_reply(bar_json, (2138, 2155, 51))
 
             if not bar_response:
                 logging.error("❌ Incomplete JSON received from OpenAPI!")
@@ -491,6 +472,15 @@ def fetch_bar_data():
                 df_processed = process_fetchbar_response(bar_data)
                 if not df_processed.empty:
                     all_bar_data.extend(df_processed.to_dict(orient="records"))
+                if has_more:
+                    bar_request = HistoricalDataRequest(
+                        ctrader_client.acc_authorized_no,
+                        from_timestamp,
+                        to_timestamp,
+                        timeframe_id,
+                        symbol_id,
+                    )
+                    bar_json = bar_request.as_json_string()
             elif py_type == 2142:
                 desc = bar_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400

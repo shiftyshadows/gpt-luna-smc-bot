@@ -7,6 +7,7 @@ import logging
 import requests
 import pytz
 import threading
+import uuid
 from flask import jsonify, request
 from src.utils.json_processing_functions import *
 from src.utils.dom_listener import dom_stream_worker
@@ -42,6 +43,29 @@ def _json_object():
     if not isinstance(data, dict):
         return None, (jsonify({"error": "Request body must be a JSON object"}), 400)
     return data, None
+
+
+def _request_reply(client, message, payload_types, matcher=None, timeout=30):
+    """Send a request and accept only its correlated response."""
+    request_id = message.get("clientMsgId")
+    expected_types = set(
+        payload_types if isinstance(payload_types, (tuple, list, set)) else (payload_types,)
+    )
+
+    def matches(response):
+        response_id = response.get("clientMsgId")
+        if response_id is not None:
+            return response_id == request_id
+        if matcher is not None and matcher(response):
+            return True
+        return response.get("payloadType") in expected_types | {2132, 2142}
+
+    return client.request_reply(message, matcher=matches, timeout=timeout)
+
+
+def _wait_reply(client, matcher, timeout=30):
+    """Wait for a correlated follow-up without sending the request again."""
+    return client.wait_for_reply(matcher, timeout=timeout)
 
 
 GMT_PLUS_2 = pytz.timezone("Etc/GMT-2")
@@ -80,7 +104,7 @@ def new_order():
     limit_price = data.get("order_price", 0.0)
     stop_loss = data.get("stop_loss", 0.0)
     take_profit = data.get("take_profit", 0.0)
-    client_order_id = data.get("c_order_id", "")
+    client_order_id = data.get("c_order_id") or f"api-{uuid.uuid4().hex}"
     order_comment = str(data.get("od_comment", {})) if od_type == "market" and len(str(data.get("od_comment", {}))) < 100 else ""
     t_frame = int(data.get("order_timeframe")) if od_type == "limit" else 1
 
@@ -134,65 +158,59 @@ def new_order():
             orderComment = order_comment,
             label = client_order_id
         )
-        ctrader_client.send_json(new_order.as_json_string())
+        order_request = new_order.as_json_string()
+        placement = _request_reply(
+            ctrader_client,
+            order_request,
+            2126,
+            matcher=lambda packet: packet.get("payload", {}).get("executionType") == 2,
+        )
+        if not placement:
+            return jsonify({"status": "error", "details": "Timeout waiting for order placement"}), 504
+        if placement.get("payloadType") == 2132:
+            e_payload = placement.get("payload", {})
+            return jsonify({
+                "status": "error",
+                "error code": e_payload.get("errorCode", "UNKNOWN ERROR"),
+                "details": e_payload.get("description"),
+            }), 500
 
-        # PHASE 1: Wait for order placement confirmation (executionType:2)
-        while not result["order_placed"]:
-            response = ctrader_client.receive_json()
-            if not response or response.get("payloadType") != 2126:
-                if response and response.get("payloadType") == 2132:
-                    e_payload = response.get("payload", {})
-                    e_code = e_payload.get("errorCode", "UNKNOWN ERROR")
-                    e_description = e_payload.get("description")
-                    logging.error(f"❌ Could not execute order: {e_code}")
-                    return jsonify({"status": "error", "error code": e_code, "details": e_description}), 500
-                else:
-                    continue
+        placement_payload = placement.get("payload", {})
+        placement_order = placement_payload.get("order", {}) or {}
+        result.update({
+            "order_placed": placement_payload.get("executionType") == 2,
+            "order_id": placement_order.get("orderId"),
+        })
+        logging.info(f"✅ Order placed - ID: {result['order_id']}")
+        if order_type == 2:
+            result["execution_price"] = limit_price
+            return jsonify({"status": "success", "details": result}), 200
 
-            payload = response.get("payload", {})
-            if payload.get("executionType") == 2:
-                order_data = payload.get("order", {})
-                result.update({
-                    "order_placed": True,
-                    "order_id": order_data.get("orderId")
-                })
-                logging.info(f"✅ Order placed - ID: {result['order_id']}")
-                if order_type == 2:
-                    result.update({
-                        "execution_price": limit_price
-                    })
-                    return jsonify({
-                        "status": "success",
-                        "details": result
-                    }), 200
+        def execution_matches(packet):
+            payload = packet.get("payload", {})
+            order = payload.get("order", {}) or {}
+            return (
+                payload.get("executionType") in {3, 7}
+                and (order.get("orderId") == result["order_id"] or order.get("label") == client_order_id)
+            )
 
+        response = _wait_reply(ctrader_client, execution_matches)
+        if not response:
+            return jsonify({"status": "error", "details": "Timeout waiting for order execution"}), 504
+        payload = response.get("payload", {})
+        if payload.get("executionType") == 3 and (payload.get("order", {}) or {}).get("orderStatus") == 2:
+            order_data = payload.get("order", {}) or {}
+            position_data = payload.get("position", {}) or {}
+            result.update({
+                "order_executed": True,
+                "execution_price": order_data.get("executionPrice"),
+                "position_id": position_data.get("positionId"),
+            })
+            logging.info(f"⚡ Order executed at {result['execution_price']}")
+            return jsonify({"status": "success", "details": result}), 200
 
-        # PHASE 2: Wait for order execution (executionType:3)
-        while not result["order_executed"]:
-            response = ctrader_client.receive_json()  # Larger buffer for possible bundled messages
-            if not response or response.get("payloadType") != 2126:
-                continue
-
-            payload = response.get("payload", {})
-            if payload.get("executionType") == 3:
-                order_data = payload.get("order", {})
-                position_data = payload.get("position", {})
-                if order_data.get("orderStatus") == 2:  # Executed
-                    result.update({
-                        "order_executed": True,
-                        "execution_price": order_data.get("executionPrice"),
-                        "position_id": position_data.get("positionId")
-                    })
-                    logging.info(f"⚡ Order executed at {result['execution_price']}")
-                    return jsonify({
-                        "status": "success",
-                        "details": result
-                    }), 200
-            elif payload.get("executionType") == 7:
-                er_code = payload.get("errorCode", "UNKKOWN ERROR")
-                order_data = payload.get("order", {})
-                logging.error(f"❌ Order could not be validated: {er_code}")
-                return jsonify({"status": "error", "order_id": order_data.get("orderId"), "error code": er_code}), 500
+        er_code = payload.get("errorCode", "UNKNOWN ERROR")
+        return jsonify({"status": "error", "order_id": result["order_id"], "error code": er_code}), 500
 
 
     except Exception as e:
@@ -229,20 +247,17 @@ def cancel_order():
         cancel_order_req = CancelOrderRequest(ctrader_client.acc_authorized_no, order_id)
         cancel_order_req = cancel_order_req.as_json_string()
 
-        for _ in range(10):
-            ctrader_client.send_json(cancel_order_req)
-            cancel_response = ctrader_client.receive_json()
-
-            if not cancel_response:
-                continue
-
+        cancel_response = _request_reply(
+            ctrader_client,
+            cancel_order_req,
+            2126,
+            matcher=lambda packet: (packet.get("payload", {}).get("order", {}) or {}).get("orderId") == order_id,
+        )
+        if cancel_response:
             payload_type = cancel_response.get("payloadType")
-            # Success Case
             if payload_type == 2126:
                 return jsonify({"status": "success", "data": cancel_response})
-
-            # Error Case
-            elif payload_type == 2132:
+            if payload_type == 2132:
                 desc = cancel_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400
 
@@ -279,8 +294,8 @@ def subscribe_depth(symbol_id):
             return jsonify({"status": "error", "details": "Depth client is not connected"}), 503
 
         sd = SubscribeDepthRequest(depth_client.acc_authorized_no, symbol_id)
-        depth_client.send_json(sd.as_json_string())
-        sd_response = depth_client.receive_json()
+        sd_request = sd.as_json_string()
+        sd_response = _request_reply(depth_client, sd_request, (2157, 2142))
         if sd_response and sd_response.get("payloadType") == int(2157):
             depth_client.mark_depth_subscribed(symbol_id)
             logging.info("Depth subscription confirmed for symbol %s", symbol_id)
@@ -326,39 +341,12 @@ def reconcile_position():
     try:
         reconcile_req = ReconcileRequest(ctrader_client.acc_authorized_no)
         reconcile_req = reconcile_req.as_json_string()
-        ctrader_client.send_json(reconcile_req)
-
-        for _ in range(10):
-            reconcile_response = ctrader_client.receive_json()
-            if not reconcile_response:
-                if not ctrader_client.acc_authorized:
-                    success, result = ensure_authenticated(ctrader_client)
-                    if not success:
-                        return jsonify({"error": result}), 401
-                    ctrader_client.send_json(reconcile_req)
-                continue
-
-            payload_type = reconcile_response.get("payloadType")
-
-            if payload_type == 2125:
-                return jsonify({
-                    "status": "success",
-                    "data": reconcile_response})
-            elif payload_type == 2142:
-                desc = reconcile_response.get("payload", {}).get("description", "Unknown error")
-                return jsonify({"status": "error", "details": desc}), 400
-            elif payload_type == 2155:
-                payload = reconcile_response.get("payload", {})
-                order_book.apply_update(
-                    payload.get("newQuotes", []),
-                    payload.get("deletedQuotes", [])
-                )
-            elif  payload_type == 51:
-                continue
-
-
-            # Ignore unexpected payload types and keep polling
-            # logging.warning(f"Unexpected payloadType: {payload_type}, continuing...")
+        reconcile_response = _request_reply(ctrader_client, reconcile_req, (2125, 2155, 51))
+        if reconcile_response and reconcile_response.get("payloadType") == 2125:
+            return jsonify({"status": "success", "data": reconcile_response})
+        if reconcile_response and reconcile_response.get("payloadType") == 2142:
+            desc = reconcile_response.get("payload", {}).get("description", "Unknown error")
+            return jsonify({"status": "error", "details": desc}), 400
 
         return jsonify({"status": "error", "details": "Timeout waiting for cTrader response"}), 504
 
@@ -393,19 +381,17 @@ def amend_position():
     try:
         amend_position_req = AmendPositionSLTPRequest(ctrader_client.acc_authorized_no, position_id, stop_loss, take_profit)
         amend_position_req = amend_position_req.as_json_string()
-        ctrader_client.send_json(amend_position_req)
-
-        for _ in range(10):
-            amend_response = ctrader_client.receive_json()
-            if not amend_response:
-                continue
+        amend_response = _request_reply(
+            ctrader_client,
+            amend_position_req,
+            2126,
+            matcher=lambda packet: (packet.get("payload", {}).get("position", {}) or {}).get("positionId") == position_id,
+        )
+        if amend_response:
             payload_type = amend_response.get("payloadType")
-
             if payload_type == 2126:
-                return jsonify({
-                    "status": "success",
-                    "data": amend_response})
-            elif payload_type == 2132:
+                return jsonify({"status": "success", "data": amend_response})
+            if payload_type == 2132:
                 desc = amend_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc})
 
@@ -457,52 +443,58 @@ def close_position():
     try:
         close_position_req = ClosePositionRequest(ctrader_client.acc_authorized_no, position_id, volume)
         close_position_req = close_position_req.as_json_string()
-        ctrader_client.send_json(close_position_req)
+        placement = _request_reply(
+            ctrader_client,
+            close_position_req,
+            2126,
+            matcher=lambda packet: packet.get("payload", {}).get("executionType") == 2,
+        )
+        if not placement:
+            return {"status": "error", "details": "Timeout waiting for close placement"}, 504
+        if placement.get("payloadType") == 2132:
+            e_payload = placement.get("payload", {})
+            return {
+                "status": "error",
+                "error code": e_payload.get("errorCode", "UNKNOWN ERROR"),
+                "details": e_payload.get("description"),
+            }, 500
 
-        # PHASE 1: Wait for order placement confirmation (executionType:2)
-        while not result["close_order_placed"]:
-            response = ctrader_client.receive_json()
-            if not response or response.get("payloadType") != 2126:
-                if response and response.get("payloadType") == 2132:
-                    e_payload = response.get("payload", {})
-                    e_code = e_payload.get("errorCode", "UNKNOWN ERROR")
-                    e_description = e_payload.get("description")
-                    logging.error(f"❌ Could not execute order: {e_code}")
-                    return {"status": "error", "error code": e_code, "details": e_description}, 500
-                else:
-                    continue
+        placement_payload = placement.get("payload", {})
+        placement_order = placement_payload.get("order", {}) or {}
+        result.update({
+            "close_order_placed": placement_payload.get("executionType") == 2,
+            "close_order_id": placement_order.get("orderId"),
+        })
+        logging.info(f"✅ Close Order placed - ID: {result['close_order_id']}")
 
-            payload = response.get("payload", {})
-            if payload.get("executionType") == 2:
-                order_data = payload.get("order", {})
-                result.update({
-                    "close_order_placed": True,
-                    "close_order_id": order_data.get("orderId")
-                })
-                logging.info(f"✅ Close Order placed - ID: {result['close_order_id']}")
+        def close_execution_matches(packet):
+            payload = packet.get("payload", {})
+            order = payload.get("order", {}) or {}
+            return (
+                payload.get("executionType") in {3, 7}
+                and (
+                    order.get("orderId") == result["close_order_id"]
+                    or order.get("positionId") == position_id
+                    or (payload.get("position", {}) or {}).get("positionId") == position_id
+                )
+            )
 
-        # PHASE 2: Wait for order execution (executionType:3)
-        while not result["close_order_executed"]:
-            response = ctrader_client.receive_json()
-            if not response or response.get("payloadType") != 2126:
-                continue
-
-            payload = response.get("payload", {})
-            if payload.get("executionType") == 3:
-                order_data = payload.get("order", {})
-                position_data = payload.get("position", {})
-                if order_data.get("orderStatus") == 2:  # Executed
-                    result.update({
-                        "close_order_executed": True,
-                        "execution_price": order_data.get("executionPrice"),
-                        "position_id": position_data.get("positionId")
-                    })
-                    logging.info(f"⚡ Order executed at {result['execution_price']}")
-            elif payload.get("executionType") == 7:
-                er_code = payload.get("errorCode", "UNKKOWN ERROR")
-                order_data = payload.get("order", {})
-                logging.error(f"❌ Order could not be validated: {er_code}")
-                return {"status": "error", "order_id": order_data.get("orderId"), "error code": er_code}, 500
+        response = _wait_reply(ctrader_client, close_execution_matches)
+        if not response:
+            return {"status": "error", "details": "Timeout waiting for close execution"}, 504
+        payload = response.get("payload", {})
+        if payload.get("executionType") == 3 and (payload.get("order", {}) or {}).get("orderStatus") == 2:
+            order_data = payload.get("order", {}) or {}
+            position_data = payload.get("position", {}) or {}
+            result.update({
+                "close_order_executed": True,
+                "execution_price": order_data.get("executionPrice"),
+                "position_id": position_data.get("positionId", position_id),
+            })
+            logging.info(f"⚡ Order executed at {result['execution_price']}")
+        else:
+            er_code = payload.get("errorCode", "UNKNOWN ERROR")
+            return {"status": "error", "order_id": result["close_order_id"], "error code": er_code}, 500
 
     except Exception as e:
         error_msg = f"Close Order processing failed: {str(e)}"
@@ -533,19 +525,12 @@ def trader_account():
     try:
         trader_req = TraderRequest(ctrader_client.acc_authorized_no)
         trader_req = trader_req.as_json_string()
-        ctrader_client.send_json(trader_req)
-
-        for _ in range(10):
-            trader_response = ctrader_client.receive_json()
-            if not trader_response:
-                continue
+        trader_response = _request_reply(ctrader_client, trader_req, (2122, 2142))
+        if trader_response:
             payload_type = trader_response.get("payloadType")
-
             if payload_type == 2122:
-                return jsonify({
-                    "status": "success",
-                    "data": trader_response})
-            elif payload_type == 2142:
+                return jsonify({"status": "success", "data": trader_response})
+            if payload_type == 2142:
                 desc = trader_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400
 
@@ -574,19 +559,12 @@ def unrealized_pnl():
         #pnl_req = GetPositionUnrealizedPnLRequest(ctrader_client.debug_account)
         pnl_req = GetPositionUnrealizedPnLRequest(ctrader_client.acc_authorized_no)
         pnl_req = pnl_req.as_json_string()
-        ctrader_client.send_json(pnl_req)
-
-        for _ in range(10):
-            pnl_response = ctrader_client.receive_json()
-            if not pnl_response:
-                continue
+        pnl_response = _request_reply(ctrader_client, pnl_req, (2188, 2142))
+        if pnl_response:
             payload_type = pnl_response.get("payloadType")
-
             if payload_type == 2188:
-                return jsonify({
-                    "status": "success",
-                    "data": pnl_response})
-            elif payload_type == 2142:
+                return jsonify({"status": "success", "data": pnl_response})
+            if payload_type == 2142:
                 desc = pnl_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400
 
@@ -626,19 +604,14 @@ def unsubscribe_depth(symbol_id):
             order_book.bids.clear()
             order_book.asks.clear()
 
-        depth_client.send_json(usd_json)
-        for _ in range(10):
-            usd_response = depth_client.receive_json()
-            if not usd_response:
-                continue
-
+        usd_response = _request_reply(depth_client, usd_json, (2159, 2142))
+        if usd_response:
             payload_type = usd_response.get("payloadType")
             if payload_type == 2159:
                 depth_client.clear_depth_subscription(symbol_id)
                 logging.info(f"🛑 Unsubscribed from symbol {symbol_id} and cleaned up worker.")
                 return jsonify({"status": "success", "message": "Unsubscribed and worker stopped"}), 200
-
-            elif payload_type == 2142:
+            if payload_type == 2142:
                 desc = usd_response.get("payload", {}).get("description", "Unknown error")
                 return jsonify({"status": "error", "details": desc}), 400
 
@@ -678,9 +651,7 @@ def fetch_current_price(symbol_id):
     sub_spot = sub_spot.as_json_string()
     #sub_live_tb = SubscribeLiveTrendbarsRequest(ctrader_client.acc_authorized_no, symbol_id, 1)
     #sub_live_tb = sub_live_tb.as_json_string()
-    ctrader_client.send_json(sub_spot)
-    #ctrader_client.send_json(sub_live_tb)
-    spot_response = ctrader_client.recv_spot_events(2131)
+    spot_response = _request_reply(ctrader_client, sub_spot, 2131)
     if spot_response and spot_response.get("payloadType") == 2131:
         spot_df = process_spot_event_data(spot_response)
         if spot_df.empty:

@@ -86,6 +86,7 @@ class CTraderSMCStrategy:
         self.open_trade_count = 0
         self.open_positions: dict[int, dict[str, Any]] = {}
         self.orders_in_flight: dict[str, Optional[int]] = {}
+        self.reconciliation_pending = False
         self.pending: Optional[PendingZoneSetup] = None
         self.invalidated_setups: set[str] = set()
         self.last_quote: dict[str, float] = {}
@@ -110,6 +111,7 @@ class CTraderSMCStrategy:
         now = int(self._now_ms())
         to_timestamp = to_timestamp or now
         from_timestamp = from_timestamp or now - 30 * 24 * 60 * 60 * 1000
+        self.reconciliation_pending = True
         self._send(ReconcileRequest(self.account_id).as_json_string())
         self._send(SubscribeSpotRequest(self.account_id, self.symbol_id).as_json_string())
         self._send(SubscribeLiveTrendbarsRequest(self.account_id, self.symbol_id, period=5).as_json_string())
@@ -177,6 +179,7 @@ class CTraderSMCStrategy:
         self._expire_pending(now)
         if (
             self.pending is not None
+            or self.reconciliation_pending
             or self.open_trade_count + len(self.orders_in_flight) >= self.config.max_active_trades
         ):
             return None
@@ -390,6 +393,9 @@ class CTraderSMCStrategy:
 
     def _handle_reconcile(self, message: dict[str, Any]) -> None:
         payload = message.get("payload", {}) or {}
+        account_id = payload.get("ctidTraderAccountId") or message.get("ctidTraderAccountId")
+        if account_id is not None and int(account_id) != self.account_id:
+            return
         positions = payload.get("position") or payload.get("positions") or []
         orders = payload.get("order") or payload.get("orders") or []
         if isinstance(positions, dict):
@@ -407,6 +413,7 @@ class CTraderSMCStrategy:
             for order in orders
             if (label := self._order_label({"order": order})) is not None
         }
+        self.reconciliation_pending = False
 
     def _handle_execution(self, message: dict[str, Any]) -> None:
         payload = message.get("payload", {})
@@ -459,6 +466,9 @@ class CTraderSMCStrategy:
                     return int(value)
                 except (TypeError, ValueError):
                     return None
+        nested_position = payload.get("position")
+        if isinstance(nested_position, dict):
+            return CTraderSMCStrategy._position_id(nested_position)
         return None
 
     def _find_zone(self, zone_id: str) -> Optional[FairValueGap | OrderBlock]:

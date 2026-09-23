@@ -21,7 +21,7 @@ def test_request_reply_skips_unrelated_reply_and_preserves_dispatcher_packet():
     seen = []
     request_id = "request-2"
     client = ReplyClient([
-        {"payloadType": 2157, "clientMsgId": "strategy-event"},
+        {"payloadType": 2115, "clientMsgId": "other-request"},
         {"payloadType": 2115, "clientMsgId": request_id},
     ])
     client.add_message_handler(seen.append)
@@ -32,8 +32,8 @@ def test_request_reply_skips_unrelated_reply_and_preserves_dispatcher_packet():
     )
 
     assert response["payloadType"] == 2115
-    assert seen == [{"payloadType": 2157, "clientMsgId": "strategy-event"}]
-    assert client.main_queue.get_nowait()["clientMsgId"] == "strategy-event"
+    assert seen == [{"payloadType": 2115, "clientMsgId": "other-request"}]
+    assert client.main_queue.get_nowait()["clientMsgId"] == "other-request"
 
 
 def test_request_reply_adds_unique_correlation_id_to_requests_without_one():

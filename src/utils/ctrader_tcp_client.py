@@ -113,13 +113,22 @@ class CTraderTCPClient:
         deadline = time() + timeout
         with self.request_lock:
             self.send_json(request)
-            while time() < deadline:
-                packet = self.receive_json()
-                if packet is None:
-                    return None
-                if predicate(packet):
-                    return packet
-                self._dispatch_unmatched_packet(packet)
+            return self._wait_for_reply_locked(predicate, deadline)
+
+    def wait_for_reply(self, matcher: Callable[[dict], bool], timeout: float = 30):
+        """Wait for a reply while preserving packets for other consumers."""
+        deadline = time() + timeout
+        with self.request_lock:
+            return self._wait_for_reply_locked(matcher, deadline)
+
+    def _wait_for_reply_locked(self, matcher: Callable[[dict], bool], deadline: float):
+        while time() < deadline:
+            packet = self.receive_json()
+            if packet is None:
+                return None
+            if matcher(packet):
+                return packet
+            self._dispatch_unmatched_packet(packet)
         return None
 
     def _dispatch_unmatched_packet(self, packet):
